@@ -17,7 +17,7 @@ class ConfigurationTests(SimpleTestCase):
             env=os.environ.copy();env.pop('GATEWAY_TESTING',None);env.pop('DATABASE_ENGINE',None)
             env.update({'DJANGO_SECRET_KEY_FILE':str(root/('missing' if omit_key else 'django')),
                         'POSTGRES_PASSWORD_FILE':str(root/'postgres'),'GATEWAY_CLIENTS_FILE':str(root/'clients'),'SGA_WRITES_ENABLED':writes})
-            result=subprocess.run([sys.executable,'-c','from config import settings; print(settings.DEBUG)'],env=env,capture_output=True,text=True)
+            result=subprocess.run([sys.executable,'-c','from config import settings; print(settings.DEBUG)'],env=env,cwd=Path(__file__).resolve().parents[2],capture_output=True,text=True)
             self.assertNotIn(canary,result.stdout+result.stderr)
             return result
     def test_real_mode_needs_files_and_disables_debug(self):
