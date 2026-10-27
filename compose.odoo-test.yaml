@@ -1,0 +1,35 @@
+# Isolated, disposable Odoo test database; no ports, secrets or production volumes.
+name: servirepuestos_odoo_test
+services:
+  odoo_test_db:
+    image: postgres:16-bookworm@sha256:d81f7b51697014367236d07ec58b54153fc28f828b72bf247fe5c7487520bcb0
+    environment:
+      POSTGRES_USER: odoo
+      POSTGRES_DB: postgres
+      POSTGRES_HOST_AUTH_METHOD: trust
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: [CMD, pg_isready, -U, odoo, -d, postgres]
+      interval: 2s
+      retries: 30
+    networks: [test]
+  odoo:
+    image: odoo:20.0@sha256:d5e3a26baa044867c826dddc09058f10e2582706bf83c146ea04fea889720c76
+    depends_on:
+      odoo_test_db: {condition: service_healthy}
+    volumes:
+      - ./odoo/addons:/mnt/extra-addons:ro
+      - ./scripts/test_odoo_immediate.py:/mnt/test_odoo_immediate.py:ro
+    tmpfs:
+      - /tmp
+      - /var/lib/odoo
+    entrypoint: [/bin/bash, -ec]
+    command:
+      - |
+        odoo --db_host=odoo_test_db --db_user=odoo -d connector_test --data-dir=/tmp/odoo --addons-path=/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons -i sga_gateway_connector --without-demo --stop-after-init --no-http
+        odoo shell --db_host=odoo_test_db --db_user=odoo -d connector_test --data-dir=/tmp/odoo --addons-path=/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons --no-http < /mnt/test_odoo_immediate.py
+    networks: [test]
+networks:
+  test:
+    internal: true

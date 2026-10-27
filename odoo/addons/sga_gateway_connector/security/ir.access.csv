@@ -1,0 +1,3 @@
+id,name,model_id/id,group_id/id,operation,domain
+access_sga_gateway_system,sga.gateway.operation system,model_sga_gateway_operation,base.group_system,cru,
+sga_gateway_company_rule,Gateway operations in allowed companies,model_sga_gateway_operation,,cru,"[('company_id', 'in', company_ids)]"

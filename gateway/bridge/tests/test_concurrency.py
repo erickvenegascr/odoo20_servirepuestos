@@ -5,7 +5,7 @@ from django.test import TransactionTestCase
 from bridge.authentication import ServicePrincipal
 from bridge.models import Operation, OperationEvent
 from bridge.serializers import SubmissionSerializer
-from bridge.services import submit, process_next
+from bridge.services import submit, process_next, process_operation
 from .test_api import envelope
 
 @skipUnless(connection.vendor == 'postgresql', 'Row-lock and uniqueness races require PostgreSQL')
@@ -30,10 +30,36 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
         submit(self.validated(), self.user())
         def run(_):
             close_old_connections()
-            try: return process_next()
+            try: return process_next(min_age_seconds=0)
             finally: connections.close_all()
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(run, range(2)))
         self.assertEqual(sorted(results), [False, True])
+        self.assertEqual(Operation.objects.get().attempts, 1)
+        self.assertEqual(OperationEvent.objects.count(), 3)
+
+    def test_immediate_delivery_racing_recovery_does_not_apply_twice(self):
+        op, _ = submit(self.validated(), self.user())
+        def run(kind):
+            close_old_connections()
+            try:
+                if kind == 'api':
+                    return process_operation(op.pk).state
+                return process_next(min_age_seconds=0)
+            finally:
+                connections.close_all()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(run, ['api', 'worker']))
+        self.assertEqual(Operation.objects.get().attempts, 1)
+        self.assertEqual(OperationEvent.objects.count(), 3)
+
+    def test_duplicate_immediate_deliveries_only_process_once(self):
+        op, _ = submit(self.validated(), self.user())
+        def run(_):
+            close_old_connections()
+            try: return process_operation(op.pk).state
+            finally: connections.close_all()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            self.assertEqual(list(pool.map(run, range(2))), ['BLOQUEADO', 'BLOQUEADO'])
         self.assertEqual(Operation.objects.get().attempts, 1)
         self.assertEqual(OperationEvent.objects.count(), 3)

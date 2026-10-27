@@ -35,6 +35,7 @@ class OperationCollection(APIView):
         serializer = SubmissionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         op, created = services.submit(serializer.validated_data, request.user)
+        op = services.process_operation(op.pk)
         return Response(OperationSerializer(op).data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
     def get(self, request):
@@ -66,4 +67,5 @@ class OperationEvents(APIView):
 class OperationRetry(APIView):
     def post(self, request, pk):
         get_object_or_404(services.scope(request.user), pk=pk)
-        return Response(OperationSerializer(services.retry(pk, request.user)).data)
+        op = services.retry(pk, request.user)
+        return Response(OperationSerializer(services.process_operation(op.pk)).data)

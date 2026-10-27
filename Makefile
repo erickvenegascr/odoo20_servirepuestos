@@ -1,4 +1,4 @@
-.PHONY: config build up down logs test check backup
+.PHONY: config build up down logs test test-odoo check backup
 config:
 	docker compose config --quiet
 build:
@@ -12,6 +12,8 @@ logs:
 	docker compose logs --tail=100 -f api worker
 test:
 	docker compose --profile test run --rm test
+test-odoo:
+	docker compose -p servirepuestos_odoo_test -f compose.odoo-test.yaml run --rm odoo
 check:
 	python3 scripts/check_repository.py
 backup:

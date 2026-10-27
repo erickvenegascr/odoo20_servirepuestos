@@ -2,8 +2,8 @@
 
 Base de integración entre Odoo 20 y SGA con un gateway Django en Docker.
 El gateway conserva operaciones, revisiones, deduplicación y auditoría en
-PostgreSQL. El módulo Odoo incluye una bandeja persistente de salida y consulta
-de estados por API. Los adaptadores que modifican SGA quedan bloqueados hasta
+PostgreSQL. El módulo Odoo envía por API inmediatamente después del commit,
+con una bandeja persistente para recuperar fallos. Los adaptadores que modifican SGA quedan bloqueados hasta
 certificar sus reglas de aplicación.
 
 ## Estructura
@@ -55,11 +55,13 @@ una operación normal. El volumen no sustituye al respaldo.
 - API de recepción/lectura y cola durable con identidad de operación y revisión.
 - Reintentos con el mismo contenido devuelven la operación existente; un contenido
   distinto bajo la misma identidad produce conflicto.
-- Worker concurrente con bloqueo PostgreSQL y bitácora de estados.
-- El worker actual registra `BLOQUEADO / SGA_NATIVE_ADAPTER_NOT_CERTIFIED`.
+- La API procesa cada operación en la misma llamada, con bloqueo PostgreSQL
+  y bitácora de estados; el worker solo recupera entregas abandonadas.
+- El procesamiento actual registra `BLOQUEADO / SGA_NATIVE_ADAPTER_NOT_CERTIFIED`.
   No escribe inventario, costos, facturas ni tablas operativas de SGA.
-- Addon Odoo con bandeja técnica, envío posterior mediante cron y consulta de
-  estados. El cron se instala desactivado, hasta configurar sus archivos de acceso.
+- Addon Odoo con envío inmediato al confirmar su transacción. La respuesta
+  actualiza el estado sin esperar un cron. Si Odoo revierte, no se envía.
+- Cron opcional de recuperación de comunicaciones fallidas, desactivado por defecto.
 - La conexión de los botones comerciales de compras, recepciones, ventas y
   precios a esa bandeja sigue pendiente, al igual que el adaptador nativo SGA.
 
@@ -84,6 +86,11 @@ GATEWAY_TESTING=1 DATABASE_ENGINE=sqlite .venv/bin/python gateway/manage.py test
 .venv/bin/python scripts/check_repository.py
 ```
 
-La prueba SQLite omite dos casos de concurrencia; la prueba Docker usa
+La prueba SQLite omite cuatro casos de concurrencia; la prueba Docker usa
 PostgreSQL real. Actualizar las dependencias desde `gateway/requirements.in`
 mediante pip-tools, regenerar sus hashes y ejecutar la suite PostgreSQL.
+
+`make test-odoo` instala el addon en Odoo 20 con PostgreSQL desechable y prueba
+commits y rollbacks reales, sustituyendo únicamente el servidor HTTP remoto.
+Finalizar con `docker compose -p servirepuestos_odoo_test -f compose.odoo-test.yaml down`: ese proyecto de
+pruebas no comparte red, secretos ni volúmenes con el gateway del entorno.

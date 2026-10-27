@@ -1,7 +1,0 @@
-<odoo>
-  <record id="sga_gateway_company_rule" model="ir.rule">
-    <field name="name">Gateway operations in allowed companies</field>
-    <field name="model_id" ref="model_sga_gateway_operation"/>
-    <field name="domain_force">[('company_id', 'in', company_ids)]</field>
-  </record>
-</odoo>

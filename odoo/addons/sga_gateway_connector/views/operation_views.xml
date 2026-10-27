@@ -15,7 +15,8 @@
     <field name="arch" type="xml">
       <form delete="false">
         <header>
-          <button name="action_queue" type="object" string="Enviar a la cola" class="oe_highlight" invisible="state != 'BORRADOR'"/>
+          <button name="action_queue" type="object" string="Enviar ahora" class="oe_highlight" invisible="state != 'BORRADOR'"/>
+          <button name="action_refresh" type="object" string="Consultar / recuperar" invisible="state == 'BORRADOR'"/>
           <field name="state"/>
         </header>
         <sheet>
@@ -27,7 +28,7 @@
             <field name="expected_target_fingerprint" readonly="state != 'BORRADOR'"/>
           </group>
           <group string="Contenido de integración"><field name="payload" readonly="state != 'BORRADOR'"/></group>
-          <group string="Seguimiento"><field name="submitted_by"/><field name="gateway_id"/>
+          <group string="Seguimiento"><field name="submitted_by"/><field name="queued_at"/><field name="gateway_id"/>
             <field name="native_keys"/><field name="last_error"/><field name="last_checked"/>
             <field name="operation_uuid"/><field name="event_uuid"/>
           </group>

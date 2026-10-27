@@ -30,3 +30,10 @@ jobs:
       - run: python gateway/manage.py makemigrations --check --dry-run
       - run: python gateway/manage.py test bridge.tests --noinput
       - run: docker compose --env-file .env.example config --quiet
+  odoo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose -p servirepuestos_odoo_test -f compose.odoo-test.yaml run --rm odoo
+      - if: always()
+        run: docker compose -p servirepuestos_odoo_test -f compose.odoo-test.yaml down

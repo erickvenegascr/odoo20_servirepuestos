@@ -2,6 +2,10 @@ import copy
 import hashlib
 import json
 import uuid
+from datetime import timedelta
+from unittest.mock import patch
+from django.db import DatabaseError
+from django.utils import timezone
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 from bridge.models import Operation, OperationEvent
@@ -48,8 +52,9 @@ class APITests(TestCase):
         self.assertEqual(res.status_code, 201, res.data)
         op = Operation.objects.get(pk=res.data['id'])
         self.assertEqual(op.payload, self.body['payload'])
-        self.assertEqual(op.events.count(), 1)
-        self.assertEqual(op.state, 'EN_COLA')
+        self.assertEqual(op.events.count(), 3)
+        self.assertEqual(op.state, 'BLOQUEADO')
+        self.assertEqual(res.data['state'], 'BLOQUEADO')
         self.assertNotIn('payload', res.data)
 
     def test_retry_of_same_business_content_returns_original(self):
@@ -61,7 +66,8 @@ class APITests(TestCase):
         self.assertEqual(second.status_code, 200, second.data)
         self.assertEqual(first.data['id'], second.data['id'])
         self.assertEqual(Operation.objects.count(), 1)
-        self.assertEqual(OperationEvent.objects.count(), 1)
+        self.assertEqual(OperationEvent.objects.count(), 3)
+        self.assertEqual(Operation.objects.get().attempts, 1)
 
     def test_changed_payload_same_identity_conflicts(self):
         self.submit()
@@ -134,9 +140,8 @@ class APITests(TestCase):
         data = json.dumps(self.body).replace('"quantity": "4"', '"quantity": NaN')
         self.assertEqual(self.api.post('/api/v1/operations/', data, content_type='application/json').status_code, 400)
 
-    def test_worker_records_block_instead_of_faking_sga_effects(self):
+    def test_api_processes_immediately_without_waiting_for_a_worker(self):
         res = self.submit()
-        self.assertTrue(process_next())
         self.assertFalse(process_next())
         op = Operation.objects.get(pk=res.data['id'])
         self.assertEqual(op.state, 'BLOQUEADO')
@@ -144,18 +149,40 @@ class APITests(TestCase):
         self.assertEqual(op.native_keys, {})
         self.assertEqual(op.attempts, 1)
         self.assertEqual(list(op.events.values_list('state', flat=True)), ['EN_COLA', 'VALIDANDO', 'BLOQUEADO'])
+        self.assertEqual(list(op.events.values_list('actor', flat=True)), ['odoo', 'api', 'api'])
+
+    def test_interrupted_immediate_delivery_remains_durable_and_is_recoverable(self):
+        with patch('bridge.api.services.process_operation', side_effect=DatabaseError):
+            self.assertEqual(self.submit().status_code, 503)
+        op = Operation.objects.get()
+        self.assertEqual(op.state, 'EN_COLA')
+        self.assertFalse(process_next())  # A recovery worker gives the API a grace period.
+        Operation.objects.filter(pk=op.pk).update(updated_at=timezone.now() - timedelta(seconds=31))
+        self.assertTrue(process_next())
+        res = self.submit()
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data['state'], 'BLOQUEADO')
+        self.assertEqual(Operation.objects.get().attempts, 1)
+
+    def test_redelivery_recovers_a_persisted_request_immediately(self):
+        with patch('bridge.api.services.process_operation', side_effect=DatabaseError):
+            self.assertEqual(self.submit().status_code, 503)
+        res = self.submit()
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data['state'], 'BLOQUEADO')
+        self.assertEqual(Operation.objects.get().attempts, 1)
 
     def test_retry_requires_role_and_only_safe_states(self):
         res = self.submit(); url = '/api/v1/operations/' + res.data['id'] + '/retry/'
         self.assertEqual(self.api.post(url, {}, format='json').status_code, 403)
-        process_next()
         self.assertEqual(client('operator').post(url, {}, format='json').status_code, 200)
-        self.assertEqual(Operation.objects.get().state, 'EN_COLA')
+        self.assertEqual(Operation.objects.get().state, 'BLOQUEADO')
+        self.assertEqual(Operation.objects.get().attempts, 2)
         Operation.objects.update(state='RESULTADO_DESCONOCIDO')
         self.assertEqual(client('operator').post(url, {}, format='json').status_code, 409)
 
     def test_events_are_scoped_and_support_incremental_read(self):
-        res = self.submit(); process_next()
+        res = self.submit()
         url = '/api/v1/operations/' + res.data['id'] + '/events/'
         events = self.api.get(url).data
         self.assertEqual(len(events['results']), 3)

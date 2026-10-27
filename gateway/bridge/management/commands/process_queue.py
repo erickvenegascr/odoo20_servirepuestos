@@ -5,7 +5,7 @@ from django.db import close_old_connections
 from bridge.services import process_next
 
 class Command(BaseCommand):
-    help = 'Process durable queued operations; native SGA writes are deliberately unavailable'
+    help = 'Recover deliveries abandoned for 30 seconds; normal processing is immediate in the API'
     def add_arguments(self, parser):
         parser.add_argument('--once', action='store_true')
         parser.add_argument('--poll-seconds', type=float, default=2.0)

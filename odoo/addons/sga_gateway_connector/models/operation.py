@@ -1,14 +1,30 @@
 import hashlib
 import json
+import logging
 import os
+from functools import partial
 from pathlib import Path
 import uuid
-from datetime import timezone
+from datetime import timedelta, timezone
 from urllib.parse import urlparse
 import requests
 from odoo import api, fields, models
 from odoo.exceptions import UserError
+from odoo.orm.registry import Registry
 from ..constants import ACTIONS, STATES
+
+_logger = logging.getLogger(__name__)
+
+def _dispatch_committed(dbname, uid, company_ids, operation_ids):
+    """Use a fresh cursor: the business transaction has already committed."""
+    try:
+        with Registry(dbname).cursor() as cr:
+            env = api.Environment(cr, uid, {'allowed_company_ids': list(company_ids)})
+            env['sga.gateway.operation'].browse(operation_ids).exists()._dispatch_pending()
+    except Exception as exc:
+        # Do not leak URLs, tokens or payloads through exception messages.
+        # Failure cannot roll back the committed movement; the durable outbox remains.
+        _logger.error('Immediate SGA gateway delivery deferred (%s); recover the persisted outbox.', type(exc).__name__)
 
 class GatewayOperation(models.Model):
     _name = 'sga.gateway.operation'
@@ -27,6 +43,7 @@ class GatewayOperation(models.Model):
     company_id = fields.Many2one('res.company', required=True, default=lambda self: self.env.company)
     state = fields.Selection([(s, s) for s in STATES], default='BORRADOR', readonly=True, copy=False, index=True)
     submitted_by = fields.Many2one('res.users', readonly=True, copy=False)
+    queued_at = fields.Datetime(readonly=True, copy=False)
     gateway_id = fields.Char(readonly=True, copy=False)
     last_error = fields.Char(readonly=True, copy=False)
     native_keys = fields.Json(readonly=True, copy=False)
@@ -40,7 +57,7 @@ class GatewayOperation(models.Model):
             if vals.get('state', 'BORRADOR') != 'BORRADOR':
                 raise UserError(self.env._('New operations must start as drafts.'))
             vals.update({'state': 'BORRADOR', 'submitted_by': False, 'gateway_id': False,
-                         'native_keys': False, 'last_error': False, 'last_checked': False,
+                         'native_keys': False, 'last_error': False, 'last_checked': False, 'queued_at': False,
                          'operation_uuid': str(uuid.uuid4()), 'event_uuid': str(uuid.uuid4()),
                          'name': str(uuid.uuid4())})
             prepared.append(vals)
@@ -50,7 +67,7 @@ class GatewayOperation(models.Model):
         return super().write(vals)
 
     def write(self, vals):
-        protected = {'state', 'submitted_by', 'gateway_id', 'native_keys', 'last_error', 'last_checked'}
+        protected = {'state', 'submitted_by', 'queued_at', 'gateway_id', 'native_keys', 'last_error', 'last_checked'}
         if protected.intersection(vals):
             raise UserError(self.env._('Gateway tracking fields can only be changed by controlled actions.'))
         immutable = {'action', 'payload', 'revision', 'aggregate_uuid', 'operation_uuid', 'event_uuid',
@@ -60,6 +77,7 @@ class GatewayOperation(models.Model):
         return super().write(vals)
 
     def action_queue(self):
+        self._configuration()
         for rec in self:
             if rec.state != 'BORRADOR' or rec.revision < 1 or not isinstance(rec.payload, dict):
                 raise UserError(self.env._('A valid draft operation with a JSON object is required.'))
@@ -68,9 +86,38 @@ class GatewayOperation(models.Model):
                 uuid.UUID(rec.aggregate_uuid)
             except (ValueError, TypeError):
                 raise UserError(self.env._('Invalid payload or aggregate UUID.'))
-            rec._gateway_update({'state': 'EN_COLA', 'submitted_by': self.env.user.id})
-        # The user transaction commits before cron performs any network request.
-        return True
+            rec._gateway_update({'state': 'EN_COLA', 'submitted_by': self.env.user.id,
+                                 'queued_at': fields.Datetime.now()})
+        self._schedule_immediate()
+        return {'type': 'ir.actions.client', 'tag': 'reload'}
+
+    def _schedule_immediate(self):
+        # Capture primitive identifiers only, never a recordset or the old cursor.
+        self.env.cr.postcommit.add(partial(_dispatch_committed, self.env.cr.dbname,
+            self.env.uid, tuple(self.env.companies.ids), tuple(self.ids)))
+
+    def _dispatch_pending(self):
+        try:
+            config = self._configuration()
+        except UserError:
+            self.filtered(lambda op: op.state == 'EN_COLA' and not op.gateway_id)._gateway_update(
+                {'last_error': 'GATEWAY_CONFIGURATION_UNAVAILABLE', 'last_checked': fields.Datetime.now()})
+            return
+        for op in self:
+            # Recovery and immediate delivery may overlap. Only one sender takes a row.
+            self.env.cr.execute('SELECT id FROM sga_gateway_operation WHERE id = %s FOR UPDATE SKIP LOCKED', [op.id])
+            if not self.env.cr.fetchone():
+                continue
+            op.invalidate_recordset()
+            if op.state == 'EN_COLA' and not op.gateway_id:
+                op._exchange(config)
+
+    def action_refresh(self):
+        config = self._configuration()
+        for op in self.filtered('gateway_id'):
+            op._exchange(config, poll=True)
+        self.filtered(lambda op: op.state == 'EN_COLA' and not op.gateway_id)._schedule_immediate()
+        return {'type': 'ir.actions.client', 'tag': 'reload'}
 
     @api.model
     def _configuration(self):
@@ -100,13 +147,14 @@ class GatewayOperation(models.Model):
             'origin_instance_id': config['SGA_GATEWAY_ORIGIN'], 'target_company_key': self.target_company_key,
             'aggregate_id': self.aggregate_uuid, 'revision': self.revision, 'action': self.action,
             'origin_system': 'odoo', 'actor_user_id': str(self.submitted_by.id),
-            'occurred_at_utc': self.create_date.replace(tzinfo=timezone.utc).isoformat(),
+            'occurred_at_utc': (self.queued_at or self.create_date).replace(tzinfo=timezone.utc).isoformat(),
             'expected_target_fingerprint': self.expected_target_fingerprint,
             'payload_sha256': hashlib.sha256(canonical).hexdigest(), 'payload': self.payload,
         }
 
     def _exchange(self, config, poll=False):
         self.ensure_one()
+        self._gateway_update({'last_checked': fields.Datetime.now()})
         url = config['SGA_GATEWAY_URL'].rstrip('/') + '/api/v1/operations/'
         if poll:
             try:
@@ -142,11 +190,19 @@ class GatewayOperation(models.Model):
             self._gateway_update({'state': 'CONFLICTO', 'last_error': 'INVALID_GATEWAY_RESPONSE'})
 
     @api.model
-    def _cron_exchange(self):
+    def _cron_recover(self):
+        """Optional repair after communication failure; never the normal delivery path."""
+        cutoff = fields.Datetime.now() - timedelta(minutes=5)
+        pending = self.search([('state', '=', 'EN_COLA'), ('gateway_id', '=', False),
+                               ('write_date', '<=', cutoff)], limit=20)
+        pending._dispatch_pending()
         config = self._configuration()
-        pending = self.search([('state', '=', 'EN_COLA'), ('gateway_id', '=', False)], limit=20)
-        for op in pending:
-            op._exchange(config)
         terminal = ['BORRADOR', 'SINCRONIZADO', 'RECHAZADO', 'CANCELADO_SIN_APLICAR', 'CONFLICTO']
-        for op in self.search([('gateway_id', '!=', False), ('state', 'not in', terminal)], limit=20):
+        for op in self.search([('gateway_id', '!=', False), ('state', 'not in', terminal),
+                               ('write_date', '<=', cutoff)], limit=20):
             op._exchange(config, poll=True)
+
+    @api.model
+    def _cron_exchange(self):
+        # Compatibility with the previous noupdate cron record on module upgrades.
+        return self._cron_recover()

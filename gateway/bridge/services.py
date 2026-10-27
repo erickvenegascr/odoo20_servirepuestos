@@ -1,7 +1,9 @@
 import hashlib
 import json
 import uuid
+from datetime import timedelta
 from django.db import IntegrityError, transaction
+from django.utils import timezone
 from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
 from .domain import NATIVE_BLOCK_REASON
 from .models import Operation, OperationEvent
@@ -73,18 +75,32 @@ def retry(operation_id, user):
                                       actor=user.client_id, code='REQUEUED')
         return op
 
-def process_next():
-    """Durable PostgreSQL queue. No native SGA effects are implemented here."""
+def _process_locked(op, actor):
+    OperationEvent.objects.create(operation=op, previous_state='EN_COLA', state='VALIDANDO', actor=actor, code='VALIDATION_STARTED')
+    # Do not pretend a stored request has applied inventory, costs or invoices.
+    op.state = 'BLOQUEADO'
+    op.attempts += 1
+    op.last_error_code = NATIVE_BLOCK_REASON
+    op.save(update_fields=['state', 'attempts', 'last_error_code', 'updated_at'])
+    OperationEvent.objects.create(operation=op, previous_state='VALIDANDO', state=op.state,
+                                  actor=actor, code=NATIVE_BLOCK_REASON)
+    return op
+
+def process_operation(operation_id):
+    """Process this persisted request immediately; duplicate deliveries cannot reapply it."""
     with transaction.atomic():
-        op = Operation.objects.select_for_update(skip_locked=True).filter(state='EN_COLA').order_by('created_at', 'id').first()
+        op = Operation.objects.select_for_update().get(pk=operation_id)
+        if op.state == 'EN_COLA':
+            _process_locked(op, 'api')
+        return op
+
+def process_next(min_age_seconds=30):
+    """Recover abandoned deliveries only. Normal delivery runs in the API request."""
+    with transaction.atomic():
+        cutoff = timezone.now() - timedelta(seconds=min_age_seconds)
+        op = Operation.objects.select_for_update(skip_locked=True).filter(
+            state='EN_COLA', updated_at__lte=cutoff).order_by('created_at', 'id').first()
         if op is None:
             return False
-        OperationEvent.objects.create(operation=op, previous_state='EN_COLA', state='VALIDANDO', actor='worker', code='VALIDATION_STARTED')
-        # Do not pretend a stored request has applied inventory, costs or invoices.
-        op.state = 'BLOQUEADO'
-        op.attempts += 1
-        op.last_error_code = NATIVE_BLOCK_REASON
-        op.save(update_fields=['state', 'attempts', 'last_error_code', 'updated_at'])
-        OperationEvent.objects.create(operation=op, previous_state='VALIDANDO', state=op.state,
-                                      actor='worker', code=NATIVE_BLOCK_REASON)
+        _process_locked(op, 'recovery-worker')
         return True

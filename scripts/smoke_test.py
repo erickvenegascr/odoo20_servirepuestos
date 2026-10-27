@@ -28,12 +28,10 @@ if args.verify:
 else:
  body={'schema_version':'1','operation_id':str(uuid.uuid4()),'event_id':str(uuid.uuid4()),'aggregate_id':str(uuid.uuid4()),'origin_instance_id':origin,'target_company_key':company,'revision':1,'action':'receipt.apply','origin_system':'odoo','actor_user_id':'synthetic-smoke-test','occurred_at_utc':'2026-10-27T12:00:00Z','expected_target_fingerprint':'UNVERIFIED','payload':{'synthetic':True}}
  status,first=call('/api/v1/operations/',body);assert status==201
+ assert first['state']=='BLOQUEADO' and first['last_error_code']=='SGA_NATIVE_ADAPTER_NOT_CERTIFIED'
  status,second=call('/api/v1/operations/',body);assert status==200 and first['id']==second['id']
  op_id=first['id']
- for i in range(15):
-  _,value=call('/api/v1/operations/'+op_id+'/')
-  if value['state']=='BLOQUEADO':break
-  time.sleep(1)
+ _,value=call('/api/v1/operations/'+op_id+'/')
  assert value['state']=='BLOQUEADO' and value['native_keys']=={}
- result={'gateway_id':op_id,'operation_id':body['operation_id'],'state':value['state'],'duplicate_reused':True,'native_writes_executed':False}
+ result={'gateway_id':op_id,'operation_id':body['operation_id'],'state':value['state'],'duplicate_reused':True,'delivery':'immediate_http_response','native_writes_executed':False}
 args.output.parent.mkdir(parents=True,exist_ok=True);args.output.write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result))
