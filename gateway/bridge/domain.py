@@ -1,0 +1,14 @@
+ACTIONS = (
+    'purchase.create_draft', 'purchase.request_approval', 'purchase.change_open_balance', 'purchase.cancel_remaining',
+    'receipt.register', 'receipt.apply', 'receipt.reverse',
+    'sale.create_prefactura', 'sale.request_approval', 'sale.reflect_invoice_stock',
+    'sale.reflect_dispatch', 'sale.reflect_delivery', 'sale.reflect_cancellation',
+    'price.publish_rule', 'price.revert_rule',
+    'cost.publish_vendor_quote', 'cost.capture_purchase', 'cost.request_revaluation',
+)
+STATES = (
+    'BORRADOR', 'EN_COLA', 'VALIDANDO', 'BLOQUEADO', 'LISTO', 'APLICANDO_SGA',
+    'RESULTADO_DESCONOCIDO', 'CONFIRMADO_SGA', 'ODOO_PENDIENTE', 'REPARAR_ODOO',
+    'CONCILIANDO', 'SINCRONIZADO', 'REINTENTO_SEGURO', 'CONFLICTO', 'RECHAZADO', 'CANCELADO_SIN_APLICAR',
+)
+NATIVE_BLOCK_REASON = 'SGA_NATIVE_ADAPTER_NOT_CERTIFIED'

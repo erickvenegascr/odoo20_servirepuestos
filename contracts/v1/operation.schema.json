@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Gateway operation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "operation_id",
+    "event_id",
+    "origin_instance_id",
+    "target_company_key",
+    "aggregate_id",
+    "revision",
+    "action",
+    "origin_system",
+    "actor_user_id",
+    "occurred_at_utc",
+    "expected_target_fingerprint",
+    "payload"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "action": {
+      "enum": [
+        "purchase.create_draft",
+        "purchase.request_approval",
+        "purchase.change_open_balance",
+        "purchase.cancel_remaining",
+        "receipt.register",
+        "receipt.apply",
+        "receipt.reverse",
+        "sale.create_prefactura",
+        "sale.request_approval",
+        "sale.reflect_invoice_stock",
+        "sale.reflect_dispatch",
+        "sale.reflect_delivery",
+        "sale.reflect_cancellation",
+        "price.publish_rule",
+        "price.revert_rule",
+        "cost.publish_vendor_quote",
+        "cost.capture_purchase",
+        "cost.request_revaluation"
+      ]
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "payload": {
+      "type": "object"
+    },
+    "origin_system": {
+      "const": "odoo"
+    },
+    "payload_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "occurred_at_utc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "origin_instance_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "target_company_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "actor_user_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "expected_target_fingerprint": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "operation_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "event_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "aggregate_id": {
+      "type": "string",
+      "format": "uuid"
+    }
+  }
+}

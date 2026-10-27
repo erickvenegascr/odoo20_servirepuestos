@@ -1,0 +1,98 @@
+{
+  "actions": [
+    "purchase.create_draft",
+    "purchase.request_approval",
+    "purchase.change_open_balance",
+    "purchase.cancel_remaining",
+    "receipt.register",
+    "receipt.apply",
+    "receipt.reverse",
+    "sale.create_prefactura",
+    "sale.request_approval",
+    "sale.reflect_invoice_stock",
+    "sale.reflect_dispatch",
+    "sale.reflect_delivery",
+    "sale.reflect_cancellation",
+    "price.publish_rule",
+    "price.revert_rule",
+    "cost.publish_vendor_quote",
+    "cost.capture_purchase",
+    "cost.request_revaluation"
+  ],
+  "states": [
+    "BORRADOR",
+    "EN_COLA",
+    "VALIDANDO",
+    "BLOQUEADO",
+    "LISTO",
+    "APLICANDO_SGA",
+    "RESULTADO_DESCONOCIDO",
+    "CONFIRMADO_SGA",
+    "ODOO_PENDIENTE",
+    "REPARAR_ODOO",
+    "CONCILIANDO",
+    "SINCRONIZADO",
+    "REINTENTO_SEGURO",
+    "CONFLICTO",
+    "RECHAZADO",
+    "CANCELADO_SIN_APLICAR"
+  ],
+  "transitions": {
+    "BORRADOR": [
+      "EN_COLA"
+    ],
+    "EN_COLA": [
+      "VALIDANDO",
+      "CANCELADO_SIN_APLICAR"
+    ],
+    "VALIDANDO": [
+      "LISTO",
+      "BLOQUEADO",
+      "CONFLICTO",
+      "RECHAZADO",
+      "CANCELADO_SIN_APLICAR"
+    ],
+    "BLOQUEADO": [
+      "EN_COLA",
+      "CANCELADO_SIN_APLICAR"
+    ],
+    "LISTO": [
+      "APLICANDO_SGA",
+      "CANCELADO_SIN_APLICAR"
+    ],
+    "APLICANDO_SGA": [
+      "CONFIRMADO_SGA",
+      "RESULTADO_DESCONOCIDO",
+      "RECHAZADO",
+      "REINTENTO_SEGURO"
+    ],
+    "RESULTADO_DESCONOCIDO": [
+      "CONFIRMADO_SGA",
+      "CONFLICTO",
+      "REINTENTO_SEGURO"
+    ],
+    "CONFIRMADO_SGA": [
+      "ODOO_PENDIENTE"
+    ],
+    "ODOO_PENDIENTE": [
+      "CONCILIANDO",
+      "REPARAR_ODOO"
+    ],
+    "REPARAR_ODOO": [
+      "ODOO_PENDIENTE"
+    ],
+    "CONCILIANDO": [
+      "SINCRONIZADO",
+      "CONFLICTO",
+      "REPARAR_ODOO"
+    ],
+    "REINTENTO_SEGURO": [
+      "EN_COLA",
+      "CANCELADO_SIN_APLICAR"
+    ],
+    "CONFLICTO": [],
+    "RECHAZADO": [],
+    "CANCELADO_SIN_APLICAR": [],
+    "SINCRONIZADO": []
+  }
+}

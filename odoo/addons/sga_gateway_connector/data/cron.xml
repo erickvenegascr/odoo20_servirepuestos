@@ -1,0 +1,9 @@
+<odoo noupdate="1">
+  <record id="cron_sga_gateway_exchange" model="ir.cron">
+    <field name="name">SGA gateway exchange</field>
+    <field name="model_id" ref="model_sga_gateway_operation"/>
+    <field name="state">code</field><field name="code">model._cron_exchange()</field>
+    <field name="interval_number">1</field><field name="interval_type">minutes</field>
+    <field name="active" eval="False"/>
+  </record>
+</odoo>

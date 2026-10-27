@@ -1,0 +1,93 @@
+name: ${COMPOSE_PROJECT_NAME:-servirepuestos_gateway}
+x-gateway: &gateway
+  image: ${GATEWAY_IMAGE:-servirepuestos-gateway:local}
+  restart: unless-stopped
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  environment: &gateway-env
+    DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+    DJANGO_SECRET_KEY_FILE: /run/secrets/django_secret_key
+    GATEWAY_CLIENTS_FILE: /run/secrets/gateway_clients
+    POSTGRES_HOST: db
+    POSTGRES_DB: ${POSTGRES_DB:-gateway}
+    POSTGRES_USER: ${POSTGRES_USER:-gateway}
+    POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    SGA_WRITES_ENABLED: '0'
+  secrets: [django_secret_key, gateway_clients, postgres_password]
+  depends_on:
+    db:
+      condition: service_healthy
+  networks: [backend]
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: '3'}
+services:
+  db:
+    image: postgres:16-bookworm@sha256:d81f7b51697014367236d07ec58b54153fc28f828b72bf247fe5c7487520bcb0
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-gateway}
+      POSTGRES_USER: ${POSTGRES_USER:-gateway}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      TZ: UTC
+    secrets: [postgres_password]
+    volumes:
+      - gateway_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [backend]
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+  migrate:
+    <<: *gateway
+    restart: 'no'
+    command: [python, manage.py, migrate, --noinput]
+  api:
+    <<: *gateway
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    depends_on:
+      db: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    ports:
+      - '${GATEWAY_BIND_ADDRESS:-127.0.0.1}:${GATEWAY_PORT:-8000}:8000'
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready/', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+  worker:
+    <<: *gateway
+    depends_on:
+      db: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    command: [python, manage.py, process_queue]
+  test:
+    <<: *gateway
+    profiles: [test]
+    restart: 'no'
+    environment:
+      <<: *gateway-env
+      GATEWAY_TESTING: '1'
+    command: [python, manage.py, test, bridge.tests, --noinput]
+volumes:
+  gateway_postgres:
+networks:
+  backend:
+    driver: bridge
+secrets:
+  django_secret_key:
+    file: ${SECRETS_DIR:?Set SECRETS_DIR}/django_secret_key.txt
+  postgres_password:
+    file: ${SECRETS_DIR:?Set SECRETS_DIR}/postgres_password.txt
+  gateway_clients:
+    file: ${SECRETS_DIR:?Set SECRETS_DIR}/gateway_clients.json

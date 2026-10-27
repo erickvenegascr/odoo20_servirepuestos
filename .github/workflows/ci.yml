@@ -1,0 +1,32 @@
+name: Gateway checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-bookworm@sha256:d81f7b51697014367236d07ec58b54153fc28f828b72bf247fe5c7487520bcb0
+        env:
+          POSTGRES_USER: gateway
+          POSTGRES_DB: gateway
+          # Disposable CI-only value; never used by a deployed environment.
+          POSTGRES_PASSWORD: test-only-postgres_password
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U gateway -d gateway"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      GATEWAY_TESTING: '1'
+      POSTGRES_HOST: 127.0.0.1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install --require-hashes -r gateway/requirements.lock
+      - run: python scripts/check_repository.py
+      - run: python gateway/manage.py makemigrations --check --dry-run
+      - run: python gateway/manage.py test bridge.tests --noinput
+      - run: docker compose --env-file .env.example config --quiet
