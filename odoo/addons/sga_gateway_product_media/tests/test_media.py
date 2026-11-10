@@ -74,6 +74,14 @@ class TestMediaApi(HttpCase):
         self.assertEqual(self.upload(item, data).status_code, 409)
         self.assertEqual(binary_content(self.product.image_1920), value)
 
+    def test_webp_content_with_legacy_jpg_name_is_replayable(self):
+        stream = io.BytesIO()
+        Image.new('RGB', (100, 70), 'green').save(stream, format='WEBP')
+        raw = stream.getvalue();item, _ = self.image()
+        item['checksum'] = hashlib.sha256(raw).hexdigest()
+        self.assertEqual(self.upload(item, base64.b64encode(raw).decode()).status_code, 200)
+        self.assertEqual(self.check(item).json()['items'][0]['status'], 'unchanged')
+
     def test_secondary_update_and_local_secondary_conflict(self):
         item, data = self.image('8_2.jpg', False);self.upload(item, data)
         item, data = self.image('8_2.jpg', False, 'green')
