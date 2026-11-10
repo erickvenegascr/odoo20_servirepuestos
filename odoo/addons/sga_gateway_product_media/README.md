@@ -13,7 +13,9 @@ POST autenticados con el mismo token de catálogo:
 - `/sga_gateway/api/v1/media/image`: un archivo de hasta 6 MiB; JPEG, PNG, WebP
   o BMP, máximo 40 megapíxeles. El cuerpo JSON tiene límite de 10 MiB.
   Los JPEG con contenedor MPO también se aceptan y Odoo normaliza su imagen
-  principal sin cambiar el archivo original de SGA.
+  principal sin cambiar el archivo original de SGA. Los WebP con extensión
+  heredada JPG se validan por su contenido; el módulo registra explícitamente
+  su decodificador porque Odoo desactiva la autocarga de plugins Pillow.
 
 El contrato fija compañía y origen desde la aplicación autenticada. No admite
 modelos ni contextos del cliente. `info` anuncia `media_contract: 1` solo cuando

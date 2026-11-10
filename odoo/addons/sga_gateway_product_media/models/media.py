@@ -5,6 +5,7 @@ import io
 import re
 
 from PIL import Image, UnidentifiedImageError
+from PIL import WebPImagePlugin  # noqa: F401 - Odoo disables Pillow plugin autoload
 from odoo import fields, models
 from odoo.exceptions import ValidationError
 from odoo.addons.servirepuestos_20_compat.binary import as_binary, binary_content
