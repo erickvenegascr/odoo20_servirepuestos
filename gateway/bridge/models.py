@@ -2,6 +2,18 @@ import uuid
 from django.db import models
 from .domain import ACTIONS, STATES
 
+class CatalogRun(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    source_instance = models.CharField(max_length=80)
+    target_fingerprint = models.CharField(max_length=64)
+    dry_run = models.BooleanField(default=True)
+    status = models.CharField(max_length=16, default='running')
+    cursor = models.PositiveBigIntegerField(default=0)
+    categories = models.PositiveIntegerField(default=0)
+    products = models.PositiveIntegerField(default=0)
+    error_code = models.CharField(max_length=80, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
 class Operation(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     client_id = models.CharField(max_length=80)

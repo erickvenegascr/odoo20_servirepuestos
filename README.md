@@ -51,6 +51,10 @@ una operación normal. El volumen no sustituye al respaldo.
 
 ## Alcance actual
 
+- Primera etapa de catálogo SGA → Odoo 20 con simulación, claves estables,
+  categorías sin uso, conflictos de edición local y auditoría PostgreSQL.
+  [Instalación, alcance y operación](docs/catalog.md). El perfil `catalog` es manual.
+
 - Autenticación de servicios por tokens, separados por cliente, origen y empresa.
 - API de recepción/lectura y cola durable con identidad de operación y revisión.
 - Reintentos con el mismo contenido devuelven la operación existente; un contenido
