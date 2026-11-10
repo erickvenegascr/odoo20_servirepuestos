@@ -24,6 +24,7 @@ zlib, ICU, LZ4 ni Zstandard. Los dumps de este PostgreSQL requieren `pg_dump -Z0
 | Recuperación | `sga-gateway-worker.service` |
 | Comunicación de regreso | `sga-gateway-exchange.service`, sondeo saliente cada 15 segundos |
 | Catálogo | `sga-gateway-catalog.service`, ejecución separada del histórico |
+| Conciliación periódica | `sga-gateway-catalog.timer`, cada hora tras validar la carga |
 
 El usuario `sgapg` posee los datos PostgreSQL en modo 0700. `sgagateway`
 ejecuta Django con un rol PostgreSQL distinto, propietario únicamente de la
@@ -36,7 +37,8 @@ Las migraciones `bridge.0001_initial`, `bridge.0002_catalogrun`,
 `bridge.0003_gatewayinbox` y contenttypes
 se aplicaron únicamente en PostgreSQL del gateway. `/health/ready/` devolvió
 `{"status":"ready"}`. La API no se publicó fuera de localhost. El adaptador
-de escritura SGA permanece deshabilitado y no se habilitó un timer de catálogo.
+de escritura SGA permanece deshabilitado. El timer de catálogo se habilita
+solo después de validar la carga y su repetición idempotente.
 
 El worker y timer históricos `sgadata-migration-worker.service` y
 `sgadata-migration-incremental.timer` quedaron detenidos y deshabilitados.
@@ -64,6 +66,24 @@ El receptor Odoo usa un token de aplicación dedicado en
 creó una cuenta Odoo ni se reutilizaron claves API personales. El intercambio
 inverso conserva mensajes y confirmaciones en PostgreSQL; responde ping/pong y
 bloquea todas las solicitudes comerciales con `SGA_READ_ONLY`.
+
+Las unidades de catálogo e intercambio están en `deploy/systemd`. Después de
+simular, cargar y repetir la conciliación sin nuevas creaciones:
+
+```bash
+install -m 0644 deploy/systemd/sga-gateway-catalog.service /etc/systemd/system/
+install -m 0644 deploy/systemd/sga-gateway-catalog.timer /etc/systemd/system/
+install -m 0644 deploy/systemd/sga-gateway-exchange.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now sga-gateway-exchange.service sga-gateway-catalog.timer
+systemctl list-timers sga-gateway-catalog.timer
+```
+
+El servicio de catálogo realiza `sync_catalog --apply` y puede invocarse con
+`systemctl start sga-gateway-catalog`. El timer es horario, con hasta 120 segundos
+de dispersión y recuperación tras reinicio. Una unidad activa no se solapa con
+otra ejecución; el bloqueo PostgreSQL protege además contra procesos manuales.
+Una falla queda auditada y la siguiente pasada comienza desde cero sin duplicar.
 
 El respaldo manual `/opt/sga-gateway/backup.sh` (fuente en
 `scripts/backup_standalone.sh`) envía `pg_dump` y el tar de configuración

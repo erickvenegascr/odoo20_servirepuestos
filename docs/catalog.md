@@ -38,8 +38,9 @@ rollback. La única interfaz de consulta admite SELECT fijos y parametrizados.
 Se recorren todos los artículos por clave, en lotes de hasta 200. Cada nueva
 corrida reconcilia el catálogo completo: `artsservsrefer` y los catálogos de
 clasificación no ofrecen un registro de cambios completo y confiable. Un cambio
-concurrente a la instantánea se recoge en la siguiente corrida. No se habilita
-ningún sondeo automático todavía.
+concurrente a la instantánea se recoge en la siguiente corrida. El perfil Docker
+es manual. En standalone, el timer separado permite conciliar cada hora después
+de validar la carga inicial y una segunda pasada sin nuevas creaciones.
 
 ## Instalar y configurar
 
@@ -118,7 +119,7 @@ estado, cantidades reconocidas, cursor confirmado y clase de error. Una corrida
 interrumpida abruptamente puede quedar `running`; la siguiente crea otra auditoría
 y el bloqueo de sesión anterior se libera cuando PostgreSQL cierra la conexión.
 
-## Validación pendiente del entorno real
+## Criterios de validación del entorno real
 
 La ejecución comercial requiere: acceso autorizado al servidor, cuenta SELECT
 vigente, addon instalado en la base Odoo 20 correcta y token de aplicación vigente. No se
