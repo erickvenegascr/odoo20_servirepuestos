@@ -1,0 +1,5 @@
+id,name,model_id/id,group_id/id,operation,domain
+access_sga_detail_binding,Consultar revisión del catálogo SGA,model_sga_catalog_detail_binding,stock.group_stock_user,r,
+sga_detail_company,Catálogo SGA en compañías permitidas,model_sga_catalog_detail_binding,,r,"[('company_id', 'in', company_ids)]"
+access_sga_subcategory_user,Consultar subcategorías,model_product_catalog_subcategory,base.group_user,r,
+access_sga_subcategory_manager,Administrar subcategorías,model_product_catalog_subcategory,product.group_product_manager,cru,

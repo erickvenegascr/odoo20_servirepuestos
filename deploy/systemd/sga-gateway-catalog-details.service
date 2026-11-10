@@ -1,0 +1,16 @@
+[Unit]
+Description=SGA fiscal and commercial catalogue (manual)
+After=network-online.target sga-gateway-postgresql.service
+Requires=sga-gateway-postgresql.service
+[Service]
+Type=oneshot
+User=sgagateway
+Group=sgagateway
+WorkingDirectory=/opt/sga-gateway/app/gateway
+EnvironmentFile=/etc/sga-gateway/gateway.env
+ExecStart=/opt/sga-gateway/venv/bin/python manage.py sync_catalog_details --apply --cabys-file /etc/sga-gateway/cabys-official.json --pricing formula
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+TimeoutStartSec=0
