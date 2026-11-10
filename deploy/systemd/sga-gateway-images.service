@@ -10,6 +10,7 @@ User=root
 Group=root
 WorkingDirectory=/opt/sga-gateway/app/gateway
 EnvironmentFile=/etc/sga-gateway/gateway.env
+ExecStartPre=/opt/sga-gateway/venv/bin/python -c 'import os; p="/media/datos/shares/sgadatos/Ver13/Documentos/Artículos/jpg"; assert os.statvfs(p).f_flag & os.ST_RDONLY; assert not os.access(p, os.W_OK)'
 ExecStart=/opt/sga-gateway/venv/bin/python manage.py sync_product_images --apply
 ReadOnlyDirectories=/media/datos/shares/sgadatos/Ver13/Documentos/Artículos/jpg
 CapabilityBoundingSet=CAP_DAC_READ_SEARCH
