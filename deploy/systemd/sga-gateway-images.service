@@ -1,0 +1,21 @@
+[Unit]
+Description=Read-only SGA product photo import to Odoo
+After=network-online.target sga-gateway-postgresql.service
+Requires=sga-gateway-postgresql.service
+[Service]
+Type=oneshot
+# Source permissions remain untouched. This bounded reader needs access to the
+# private SGA share; it exposes no listener and mounts the photo source read-only.
+User=root
+Group=root
+WorkingDirectory=/opt/sga-gateway/app/gateway
+EnvironmentFile=/etc/sga-gateway/gateway.env
+ExecStartPre=/opt/sga-gateway/venv/bin/python -c 'import os; p="/media/datos/shares/sgadatos/Ver13/Documentos/Artículos/jpg"; assert os.statvfs(p).f_flag & os.ST_RDONLY; assert not os.access(p, os.W_OK)'
+ExecStart=/opt/sga-gateway/venv/bin/python manage.py sync_product_images --apply
+ReadOnlyDirectories=/media/datos/shares/sgadatos/Ver13/Documentos/Artículos/jpg
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+TimeoutStartSec=0

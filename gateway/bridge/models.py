@@ -16,6 +16,22 @@ class CatalogRun(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
 
+class ProductImageRun(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    source_instance = models.CharField(max_length=80)
+    target_fingerprint = models.CharField(max_length=64)
+    dry_run = models.BooleanField(default=True)
+    status = models.CharField(max_length=16, default='running')
+    files = models.PositiveIntegerField(default=0)
+    products = models.PositiveIntegerField(default=0)
+    primary = models.PositiveIntegerField(default=0)
+    secondary = models.PositiveIntegerField(default=0)
+    result_counts = models.JSONField(default=dict)
+    last_key = models.CharField(max_length=255, blank=True)
+    error_code = models.CharField(max_length=80, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
 class GatewayInbox(models.Model):
     application_uuid = models.UUIDField()
     message_uuid = models.UUIDField()

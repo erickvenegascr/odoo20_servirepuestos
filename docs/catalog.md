@@ -1,6 +1,6 @@
 # Etapa 1: catálogo SGA → Odoo 20
 
-El addon `sga_gateway_connector` 20.0.1.3.2 incorpora el contrato de entrada del
+El addon `sga_gateway_connector` 20.0.1.4.0 incorpora el contrato de entrada del
 catálogo. El gateway mantiene su bandeja anterior y continúa rechazando toda
 escritura hacia SGA. Este trabajo no reactiva el monitor de migración histórica
 ni su temporizador, ni encola compras, ventas, pagos o inventario.
@@ -18,8 +18,9 @@ impuestos o reglas comerciales ya homologadas. Si está instalado
 `product_smart_search`, los atributos alimentan además su campo de búsqueda.
 Respeta la normalización de nombres de `product_name_uppercase` cuando existe.
 
-Esta etapa no carga precios, costos, impuestos, existencias, imágenes ni
-documentos. Los valores comerciales existentes se conservan. Los nuevos
+El contrato descriptivo no carga precios, costos, impuestos, existencias ni
+documentos. Las fotografías usan el complemento separado explicado abajo.
+Los valores comerciales existentes se conservan. Los nuevos
 productos usan los valores predeterminados nativos del entorno; deben permanecer
 fuera de operación comercial hasta homologar tarifas, impuestos y unidades.
 No se elimina ni archiva un artículo por desaparecer de una lectura. Solo se
@@ -129,3 +130,44 @@ por terminada esta etapa.
 
 Referencias: [JSON-2 y transacciones Odoo 20](https://www.odoo.com/documentation/20.0/developer/reference/external_api.html),
 [permisos efectivos en MariaDB](https://mariadb.com/docs/server/reference/sql-statements/administrative-sql-statements/show/show-grants).
+
+## Fotografías: principal y galería
+
+Instalar `sga_gateway_product_media`, que reutiliza `product_image_gallery`,
+sin eCommerce. `sync_product_images` inventaría la carpeta existente, compara
+metadatos con Odoo y transmite únicamente archivos nuevos o cambiados. Por
+defecto simula correspondencias y checksums; la decodificación y validación de
+contenido la realiza Odoo al aplicar. `--apply` importa imágenes.
+
+El sufijo explícito `_1` tiene prioridad como principal; en ausencia de ese
+archivo se elige la primera posición disponible. Se conservan todos los demás
+archivos, incluso sufijos repetidos con distintas extensiones. No se eliminan
+fotos al desaparecer un archivo del origen ni se sobrescriben ediciones locales.
+Cada corrida queda en `ProductImageRun` con cantidades, resultado y última clave.
+Los reintentos revisan todo el conjunto y reconocen los efectos ya confirmados.
+
+La carpeta SGA mantiene sus permisos. Para la instalación standalone, la unidad
+manual `deploy/systemd/sga-gateway-images.service` realiza la lectura con acceso
+autorizado, monta la carpeta fuente como solo lectura y limita capacidades a
+lectura de archivos. La API/worker general continúa con su usuario sin root.
+Esta unidad no habilita escrituras de base de datos ni modifica archivos SGA.
+
+## Diseño para detectar cambios con menor latencia
+
+La inspección SELECT del 10 de noviembre confirmó MariaDB 5.5.68,
+`log_bin=OFF`, `binlog_format=STATEMENT` e índices PGTS en `artsservs`,
+`artsservsrefer`, `artsservsprecios`, `categorias`, `categoriassub` y `divisiones`.
+No se cambió esa configuración. Una mejora compatible con solo lectura consiste
+en consultar esas marcas cada pocos segundos, comparar huellas de los campos
+sincronizados y conservar marcas/huellas y mensajes pendientes en PostgreSQL.
+La memoria puede acelerar la comparación; no sustituye la consulta ni el estado
+durable. Las categorías/referencias y dependencias de precios deben observarse
+por separado. Las ventanas se solapan y una conciliación de claves/huellas
+repara cambios tardíos o desapariciones. No certifica todos los estados intermedios.
+
+Para una bitácora completa se evaluaría CDC compatible con esta versión o
+triggers pequeños que agreguen eventos a una outbox transaccional. Un trigger
+AFTER sigue dentro de la transacción: no debe llamar HTTP ni depender de Odoo.
+Crear esa infraestructura sí modifica SGA y queda fuera del modo actual.
+La escritura Odoo → SGA sigue bloqueada hasta validar y habilitar un adaptador
+nativo por operación, con control de revisión y prevención de ecos.

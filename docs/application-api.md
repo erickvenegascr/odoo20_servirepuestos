@@ -1,6 +1,6 @@
 # API de aplicación: receptor Odoo y comunicación inversa
 
-`sga_gateway_connector` 20.0.1.3.2 incorpora un receptor HTTP propio, siguiendo
+`sga_gateway_connector` 20.0.1.4.0 incorpora un receptor HTTP propio, siguiendo
 el patrón de credenciales de Device Hub. No crea usuarios de Odoo ni utiliza
 claves API personales o JSON-2 para comunicar las aplicaciones.
 
@@ -17,11 +17,19 @@ sesión de usuario no sustituyen al token de aplicación.
 | `/sga_gateway/api/v1/catalog/batch` | Recibe artículos/categorías; simulación por defecto |
 | `/sga_gateway/api/v1/exchange/poll` | Entrega mensajes Odoo → gateway con lease de 120 segundos |
 | `/sga_gateway/api/v1/exchange/ack` | Confirma el resultado del mensaje y su lease |
+| `/sga_gateway/api/v1/media/check` | Con el complemento de fotos: compara identidades y checksums |
+| `/sga_gateway/api/v1/media/image` | Con el complemento de fotos: principal o secundaria por artículo |
 
-Los cuerpos son objetos JSON de hasta 256 KiB. El catálogo admite hasta 200
+Las rutas de catálogo e intercambio reciben JSON de hasta 256 KiB. El catálogo admite hasta 200
 elementos por transacción. Cualquier conflicto o dato inválido revierte el lote
 completo. El cliente verifica base, compañía, aplicación y origen antes de leer
 SGA. No sigue redirecciones ni acepta claves API personales como fallback.
+
+El complemento `sga_gateway_product_media` recibe archivos de hasta 6 MiB
+(cuerpo JSON de 10 MiB), verifica el tipo de imagen y su SHA-256 y conserva
+principal y galería. La consulta de metadatos reconoce imágenes ya importadas
+sin transferir de nuevo sus bytes. Una edición local produce conflicto. La
+normalización de Odoo usa un checksum separado del original SGA.
 
 Los errores de concurrencia de PostgreSQL se propagan al mecanismo nativo de
 reintento de Odoo: se revierte y repite la petición completa. La fecha de última
