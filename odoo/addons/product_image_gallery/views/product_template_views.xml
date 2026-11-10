@@ -7,7 +7,7 @@
         <field name="arch" type="xml">
             <xpath expr="//notebook" position="inside">
                 <page string="Galería de imágenes" name="image_gallery">
-                    <field name="gallery_image_ids" mode="kanban,list">
+                    <field name="gallery_image_ids" mode="kanban">
                         <kanban default_order="sequence, id" class="o_kanban_small_column">
                             <field name="name"/>
                             <field name="image_512"/>
