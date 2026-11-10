@@ -12,7 +12,20 @@ class CatalogRun(models.Model):
     categories = models.PositiveIntegerField(default=0)
     products = models.PositiveIntegerField(default=0)
     error_code = models.CharField(max_length=80, blank=True)
+    result_counts = models.JSONField(default=dict)
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+class GatewayInbox(models.Model):
+    application_uuid = models.UUIDField()
+    message_uuid = models.UUIDField()
+    request_checksum = models.CharField(max_length=64)
+    result = models.JSONField()
+    received_at = models.DateTimeField(auto_now_add=True)
+    acknowledged_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['application_uuid', 'message_uuid'], name='unique_gateway_inbox_message')]
 
 class Operation(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

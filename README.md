@@ -51,6 +51,10 @@ una operación normal. El volumen no sustituye al respaldo.
 
 ## Alcance actual
 
+- Receptor HTTP Odoo con token entre aplicaciones, sin usuarios ni claves API
+  personales, más bandeja durable de comunicación inversa por sondeo.
+  [API de aplicación y límites de solo lectura](docs/application-api.md).
+
 - Primera etapa de catálogo SGA → Odoo 20 con simulación, claves estables,
   categorías sin uso, conflictos de edición local y auditoría PostgreSQL.
   [Instalación, alcance y operación](docs/catalog.md). El perfil `catalog` es manual.

@@ -73,13 +73,15 @@ class CatalogSafetyTests(SimpleTestCase):
         for url in ['http://odoo.invalid', 'https://user:password@odoo.invalid', 'https://odoo.invalid/path']:
             with self.assertRaises(ValueError):
                 CatalogOdoo({'url': url})
-        client = CatalogOdoo({'url': 'https://odoo.invalid', 'api_key': 'synthetic',
+        client = CatalogOdoo({'url': 'https://odoo.invalid', 'token': 'sgw1_' + 't' * 64,
                               'database': 'synthetic-db', 'company_id': 1})
         with patch.object(client.session, 'post') as post:
             post.return_value.status_code = 302
             with self.assertRaises(RuntimeError):
                 client.call('catalog_info')
             self.assertFalse(post.call_args.kwargs['allow_redirects'])
+            self.assertTrue(post.call_args.args[0].endswith('/sga_gateway/api/v1/info'))
+            self.assertNotIn('context', post.call_args.kwargs['json'])
         client.close()
 
 
@@ -99,7 +101,8 @@ class CatalogCommandTests(TestCase):
             def call(method, **kwargs):
                 if method == 'catalog_info':
                     return {'contract': 1, 'database': 'wrong' if wrong_database else 'synthetic-db',
-                            'company_id': 1, 'sga_writes_enabled': False}
+                            'company_id': 1, 'sga_writes_enabled': False,
+                            'source_instance': 'synthetic-sga', 'authentication': 'application_token'}
                 if kwargs['products'] and fail:
                     raise TimeoutError('synthetic lost acknowledgement')
                 return {'categories': len(kwargs['categories']), 'products': len(kwargs['products'])}
