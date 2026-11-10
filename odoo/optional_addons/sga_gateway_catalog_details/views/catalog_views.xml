@@ -1,0 +1,52 @@
+<odoo>
+    <record id="subcategory_list" model="ir.ui.view">
+        <field name="name">product.catalog.subcategory.list</field>
+        <field name="model">product.catalog.subcategory</field>
+        <field name="arch" type="xml"><list><field name="code"/><field name="name"/><field name="line_id"/><field name="active" optional="hide"/></list></field>
+    </record>
+    <record id="subcategory_form" model="ir.ui.view">
+        <field name="name">product.catalog.subcategory.form</field>
+        <field name="model">product.catalog.subcategory</field>
+        <field name="arch" type="xml"><form><sheet><group><field name="code"/><field name="name"/><field name="line_id"/><field name="active"/></group></sheet></form></field>
+    </record>
+    <record id="subcategory_action" model="ir.actions.act_window">
+        <field name="name">Subcategorías</field><field name="res_model">product.catalog.subcategory</field><field name="view_mode">list,form</field>
+    </record>
+    <menuitem id="subcategory_menu" name="Subcategorías" parent="product_catalog_classification.menu_classification_root" action="subcategory_action" sequence="35" groups="product.group_product_manager"/>
+    <record id="product_details_form" model="ir.ui.view">
+        <field name="name">product.template.sga.catalog.details</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_only_form_view"/>
+        <field name="priority">100</field>
+        <field name="arch" type="xml">
+            <xpath expr="//sheet" position="before">
+                <field name="sga_catalog_review_note" invisible="1"/>
+                <div class="alert alert-warning" role="alert" invisible="not sga_catalog_review_note"><field name="sga_catalog_review_note" nolabel="1"/></div>
+            </xpath>
+            <xpath expr="//field[@name='catalog_line_id']" position="after"><field name="catalog_subcategory_id"/></xpath>
+        </field>
+    </record>
+    <record id="binding_list" model="ir.ui.view">
+        <field name="name">sga.catalog.detail.binding.list</field>
+        <field name="model">sga.catalog.detail.binding</field>
+        <field name="arch" type="xml">
+            <list create="0" edit="0" delete="0" decoration-warning="missing_cabys or missing_price or unverified_cabys">
+                <field name="article_id"/><field name="product_id"/><field name="product_active"/>
+                <field name="missing_cabys"/><field name="unverified_cabys"/><field name="missing_price"/>
+                <field name="tax_corrected" optional="hide"/><field name="company_id" groups="base.group_multi_company"/>
+            </list>
+        </field>
+    </record>
+    <record id="binding_form" model="ir.ui.view">
+        <field name="name">sga.catalog.detail.binding.form</field>
+        <field name="model">sga.catalog.detail.binding</field>
+        <field name="arch" type="xml"><form create="0" edit="0" delete="0"><sheet><group><field name="product_id"/><field name="article_id"/><field name="product_active"/><field name="missing_cabys"/><field name="unverified_cabys"/><field name="missing_price"/><field name="tax_corrected"/></group><group groups="base.group_system"><field name="source_instance"/><field name="source_checksum"/><field name="target_checksum"/><field name="source_snapshot"/></group></sheet></form></field>
+    </record>
+    <record id="binding_search" model="ir.ui.view">
+        <field name="name">sga.catalog.detail.binding.search</field>
+        <field name="model">sga.catalog.detail.binding</field>
+        <field name="arch" type="xml"><search><field name="product_id"/><field name="article_id"/><filter name="missing_cabys" string="Sin CABYS en SGA" domain="[('missing_cabys','=',True)]"/><filter name="missing_price" string="Sin precio en SGA" domain="[('missing_price','=',True)]"/><filter name="unverified_cabys" string="Revisar CABYS" domain="[('unverified_cabys','=',True)]"/><separator/><filter name="active_products" string="Artículos activos" domain="[('product_active','=',True)]"/></search></field>
+    </record>
+    <record id="binding_action" model="ir.actions.act_window"><field name="name">Revisión del catálogo SGA</field><field name="res_model">sga.catalog.detail.binding</field><field name="view_mode">list,form</field></record>
+    <menuitem id="binding_menu" name="Revisión de catálogo" parent="sga_gateway_connector.menu_sga_gateway" action="binding_action" sequence="30" groups="stock.group_stock_user"/>
+</odoo>

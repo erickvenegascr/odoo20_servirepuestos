@@ -32,6 +32,25 @@ class ProductImageRun(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
 
+class CatalogDetailRun(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    source_instance = models.CharField(max_length=80)
+    target_fingerprint = models.CharField(max_length=64)
+    official_catalog_checksum = models.CharField(max_length=64)
+    pricing_strategy = models.CharField(max_length=16, default='formula')
+    dry_run = models.BooleanField(default=True)
+    status = models.CharField(max_length=16, default='running')
+    products = models.PositiveIntegerField(default=0)
+    prices = models.PositiveIntegerField(default=0)
+    cursor = models.PositiveIntegerField(default=0)
+    result_counts = models.JSONField(default=dict)
+    price_result_counts = models.JSONField(default=dict)
+    master_counts = models.JSONField(default=dict)
+    issue_counts = models.JSONField(default=dict)
+    error_code = models.CharField(max_length=80, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
 class GatewayInbox(models.Model):
     application_uuid = models.UUIDField()
     message_uuid = models.UUIDField()
