@@ -94,7 +94,10 @@ class MediaImport(models.AbstractModel):
             if not raw or len(raw) > MAX_IMAGE_BYTES or hashlib.sha256(raw).hexdigest() != item['checksum']:
                 raise ValueError('checksum')
             with Image.open(io.BytesIO(raw)) as image:
-                if image.format not in {'JPEG', 'PNG', 'WEBP', 'BMP'} or image.width * image.height > 40000000:
+                # Some valid .jpg camera files contain an MPO/MPF container.
+                # Odoo normalizes its primary frame to JPEG while the raw
+                # source checksum still identifies the untouched SGA file.
+                if image.format not in {'JPEG', 'MPO', 'PNG', 'WEBP', 'BMP'} or image.width * image.height > 40000000:
                     raise ValueError('image_bounds')
                 image.verify()
         except (ValueError, OSError, UnidentifiedImageError, binascii.Error, Image.DecompressionBombError):

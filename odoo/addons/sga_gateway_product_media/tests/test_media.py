@@ -4,6 +4,7 @@ import io
 import json
 
 from PIL import Image
+from PIL import MpoImagePlugin  # noqa: F401 - register the synthetic MPO encoder
 from odoo.tests import HttpCase, tagged
 from odoo.addons.servirepuestos_20_compat.binary import as_binary, binary_content
 
@@ -53,6 +54,16 @@ class TestMediaApi(HttpCase):
         self.assertEqual(self.upload(item, data).status_code, 200)
         self.assertNotEqual(self.product.sga_media_primary_checksum, self.product.sga_media_primary_target_checksum)
         self.assertEqual(self.check(item).json()['items'][0]['status'], 'unchanged')
+
+    def test_jpeg_with_mpo_container_is_normalized_and_replayable(self):
+        stream = io.BytesIO()
+        Image.new('RGB', (100, 70), 'red').save(stream, format='MPO', save_all=True,
+            append_images=[Image.new('RGB', (100, 70), 'blue')])
+        raw = stream.getvalue();item, _ = self.image()
+        item['checksum'] = hashlib.sha256(raw).hexdigest()
+        self.assertEqual(self.upload(item, base64.b64encode(raw).decode()).status_code, 200)
+        self.assertEqual(self.check(item).json()['items'][0]['status'], 'unchanged')
+        self.assertNotEqual(self.product.sga_media_primary_checksum, self.product.sga_media_primary_target_checksum)
 
     def test_local_edits_are_conflicts_and_are_preserved(self):
         item, data = self.image();self.upload(item, data)
