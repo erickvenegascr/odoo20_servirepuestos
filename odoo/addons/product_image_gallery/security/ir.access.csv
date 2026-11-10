@@ -1,0 +1,2 @@
+id,name,model_id,group_id/id,operation,domain
+access_product_gallery_image_user,product.gallery.image user,product.gallery.image,base.group_user,crud,

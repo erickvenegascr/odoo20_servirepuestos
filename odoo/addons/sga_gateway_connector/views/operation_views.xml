@@ -40,6 +40,6 @@
     <field name="name">Operaciones del gateway</field><field name="res_model">sga.gateway.operation</field>
     <field name="view_mode">list,form</field>
   </record>
-  <menuitem id="menu_sga_gateway" name="Integración SGA" groups="base.group_system"/>
+  <menuitem id="menu_sga_gateway" name="Integración SGA" groups="base.group_system" web_icon="sga_gateway_connector,static/description/icon.png"/>
   <menuitem id="menu_sga_gateway_operations" name="Operaciones" parent="menu_sga_gateway" action="action_sga_gateway_operations"/>
 </odoo>

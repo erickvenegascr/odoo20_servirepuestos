@@ -25,6 +25,7 @@ zlib, ICU, LZ4 ni Zstandard. Los dumps de este PostgreSQL requieren `pg_dump -Z0
 | Comunicación de regreso | `sga-gateway-exchange.service`, sondeo saliente cada 15 segundos |
 | Catálogo | `sga-gateway-catalog.service`, ejecución separada del histórico |
 | Conciliación periódica | `sga-gateway-catalog.timer`, cada hora tras validar la carga |
+| Fotografías | `sga-gateway-images.service`, ejecución manual y carpeta fuente montada solo lectura |
 
 El usuario `sgapg` posee los datos PostgreSQL en modo 0700. `sgagateway`
 ejecuta Django con un rol PostgreSQL distinto, propietario únicamente de la
@@ -34,7 +35,7 @@ La conexión SGA reutiliza `sgamigrate_ro`; SHOW GRANTS confirmó solo lectura.
 La clave Odoo anterior fue rechazada con HTTP 401 y no se reutilizó.
 
 Las migraciones `bridge.0001_initial`, `bridge.0002_catalogrun`,
-`bridge.0003_gatewayinbox` y contenttypes
+`bridge.0003_gatewayinbox`, `bridge.0004_productimagerun` y contenttypes
 se aplicaron únicamente en PostgreSQL del gateway. `/health/ready/` devolvió
 `{"status":"ready"}`. La API no se publicó fuera de localhost. El adaptador
 de escritura SGA permanece deshabilitado. El timer de catálogo se habilita
@@ -84,6 +85,15 @@ El servicio de catálogo realiza `sync_catalog --apply` y puede invocarse con
 de dispersión y recuperación tras reinicio. Una unidad activa no se solapa con
 otra ejecución; el bloqueo PostgreSQL protege además contra procesos manuales.
 Una falla queda auditada y la siguiente pasada comienza desde cero sin duplicar.
+
+Para fotos, instalar primero el complemento Odoo `sga_gateway_product_media`.
+La inspección confirmó que la cuenta OS del servicio general no puede leer la
+carpeta privada de fotos. Sus permisos permanecen intactos: la unidad manual
+de imágenes usa un lector sin puertos entrantes, monta esa carpeta como solo
+lectura y limita capacidades a `CAP_DAC_READ_SEARCH`. Envía archivos únicamente
+al receptor HTTPS ya autenticado y validado. La migración histórica sigue parada.
+El comando sin `--apply` solo simula la correspondencia y compara checksums;
+el servidor Odoo decodifica y valida el contenido antes de aplicar cada archivo.
 
 El respaldo manual `/opt/sga-gateway/backup.sh` (fuente en
 `scripts/backup_standalone.sh`) envía `pg_dump` y el tar de configuración

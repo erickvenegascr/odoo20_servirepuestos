@@ -60,6 +60,11 @@ una operación normal. El volumen no sustituye al respaldo.
   categorías sin uso, conflictos de edición local y auditoría PostgreSQL.
   [Instalación, alcance y operación](docs/catalog.md). El perfil `catalog` es manual.
 
+- Fotografías SGA: principal y todas las secundarias en una galería, con
+  comparación SHA-256, control de ediciones locales y replay sin duplicados.
+  Complemento `sga_gateway_product_media`, sin eCommerce ni cambios en SGA.
+  La app Integración SGA tiene icono propio y acceso a sus conexiones.
+
 - Autenticación de servicios por tokens, separados por cliente, origen y empresa.
 - API de recepción/lectura y cola durable con identidad de operación y revisión.
 - Reintentos con el mismo contenido devuelven la operación existente; un contenido

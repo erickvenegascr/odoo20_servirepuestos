@@ -26,7 +26,8 @@ class CatalogOdoo:
 
     def call(self, method, **kwargs):
         routes = {'catalog_info': 'info', 'apply_catalog_batch': 'catalog/batch',
-                  'poll': 'exchange/poll', 'ack': 'exchange/ack'}
+                  'poll': 'exchange/poll', 'ack': 'exchange/ack',
+                  'check_images': 'media/check', 'apply_image': 'media/image'}
         if method not in routes:
             raise ValueError('Unsupported application contract method')
         response = self.session.post(
