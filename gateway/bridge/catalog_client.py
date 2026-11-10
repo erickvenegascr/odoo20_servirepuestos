@@ -1,5 +1,6 @@
 """One Odoo transaction per catalog batch; retries use stable native identities."""
 from urllib.parse import urlparse
+from pathlib import Path
 import requests
 
 
@@ -18,13 +19,21 @@ class CatalogOdoo:
             raise ValueError('Catalog destination requires an HTTPS origin URL')
         self.session = requests.Session()
         self.session.trust_env = False
+        self.token = (Path(config['token_file']).read_text().strip() if config.get('token_file')
+                      else config.get('token', ''))
+        if not self.token.startswith('sgw1_') or not 40 <= len(self.token) <= 128:
+            raise ValueError('An application token is required; personal API keys are not accepted')
 
     def call(self, method, **kwargs):
+        routes = {'catalog_info': 'info', 'apply_catalog_batch': 'catalog/batch',
+                  'poll': 'exchange/poll', 'ack': 'exchange/ack'}
+        if method not in routes:
+            raise ValueError('Unsupported application contract method')
         response = self.session.post(
-            self.config['url'].rstrip('/') + '/json/2/sga.catalog.import/' + method,
-            headers={'Authorization': 'Bearer ' + self.config['api_key'],
+            self.config['url'].rstrip('/') + '/sga_gateway/api/v1/' + routes[method],
+            headers={'Authorization': 'Bearer ' + self.token,
                      'X-Odoo-Database': self.config['database']},
-            json={**kwargs, 'context': {'allowed_company_ids': [int(self.config['company_id'])]}},
+            json=kwargs,
             timeout=(10, 120), allow_redirects=False,
         )
         if response.status_code != 200:

@@ -50,7 +50,9 @@ class Command(BaseCommand):
             client = CatalogOdoo(target)
             info = client.call('catalog_info')
             if (info.get('contract') != 1 or info.get('company_id') != int(target['company_id'])
-                    or info.get('database') != target['database'] or info.get('sga_writes_enabled') is not False):
+                    or info.get('database') != target['database'] or info.get('sga_writes_enabled') is not False
+                    or info.get('source_instance') != instance or info.get('authentication') != 'application_token'
+                    or (target.get('application_id') and info.get('application_id') != target['application_id'])):
                 raise ValueError('Odoo catalog contract/company mismatch')
             with CatalogSource(source_config) as source:
                 nodes = source.categories()
@@ -69,7 +71,9 @@ class Command(BaseCommand):
                     # Advance only after the complete Odoo transaction was acknowledged.
                     run.cursor = rows[-1]['article_id']
                     run.products += result['products']
-                    run.save(update_fields=['cursor', 'products'])
+                    for key in ('created', 'updated', 'unchanged'):
+                        run.result_counts[key] = run.result_counts.get(key, 0) + result.get(key, 0)
+                    run.save(update_fields=['cursor', 'products', 'result_counts'])
                     self.stdout.write(f'{run.id}: articles={run.products} cursor={run.cursor}')
             run.status = 'succeeded'
             run.save(update_fields=['status'])
@@ -87,4 +91,4 @@ class Command(BaseCommand):
                     cursor.execute('SELECT pg_advisory_unlock(%s)', [lock])
         self.stdout.write(self.style.SUCCESS(
             f'{"SIMULATION" if run.dry_run else "APPLIED"} {run.id}: '
-            f'categories={run.categories}, articles={run.products}'))
+            f'categories={run.categories}, articles={run.products}, results={run.result_counts}'))

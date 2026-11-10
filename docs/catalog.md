@@ -1,6 +1,6 @@
 # Etapa 1: catálogo SGA → Odoo 20
 
-El addon `sga_gateway_connector` 20.0.1.2.1 incorpora el contrato de entrada del
+El addon `sga_gateway_connector` 20.0.1.3.0 incorpora el contrato de entrada del
 catálogo. El gateway mantiene su bandeja anterior y continúa rechazando toda
 escritura hacia SGA. Este trabajo no reactiva el monitor de migración histórica
 ni su temporizador, ni encola compras, ventas, pagos o inventario.
@@ -72,17 +72,17 @@ ningún sondeo automático todavía.
   "url": "https://servirepuestos.odoo.com",
   "database": "NOMBRE_REAL_CONFIRMADO_DE_ODOO20",
   "company_id": 1,
-  "api_key": "SECRETO"
+  "application_id": "UUID_DE_LA_APLICACION",
+  "token_file": "/etc/sga-gateway/odoo_application_token.txt"
 }
 ```
 
-El endpoint admite administradores y el grupo `Sincronizar catálogo SGA`.
-La cuenta técnica solo necesita ese grupo, sin usuario interno ni permisos
-generales de productos, inventario o contabilidad. El contrato valida compañía,
-identidades y una lista cerrada de campos antes de elevar únicamente el acceso
-a los dos modelos del catálogo; no expone operaciones ORM arbitrarias. Se exige HTTPS verificado, no se siguen
-redirecciones y nunca se registra el cuerpo de errores HTTP. Antes de leer SGA,
-se confirma contrato, base real y compañía de Odoo.
+El receptor usa un token entre aplicaciones, asociado a una compañía y origen,
+con SHA-256 en Odoo y el secreto solo en el gateway. No requiere un usuario
+Odoo ni una clave API personal. Configurar `application_id` y `token_file` en
+el destino; ver [API y comunicación inversa](application-api.md). Se exige
+HTTPS verificado, sin redirecciones. Antes de leer SGA se verifica la identidad
+completa del destino.
 
 ```bash
 docker compose build api
@@ -119,7 +119,7 @@ y el bloqueo de sesión anterior se libera cuando PostgreSQL cierra la conexión
 ## Validación pendiente del entorno real
 
 La ejecución comercial requiere: acceso autorizado al servidor, cuenta SELECT
-vigente, addon instalado en la base Odoo 20 correcta y API key vigente. No se
+vigente, addon instalado en la base Odoo 20 correcta y token de aplicación vigente. No se
 puede declarar el catálogo migrado solo por pasar pruebas con datos sintéticos.
 Comparar conteos, rutas y una segunda corrida sin nuevas creaciones antes de dar
 por terminada esta etapa.

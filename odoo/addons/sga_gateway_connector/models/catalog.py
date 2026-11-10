@@ -62,6 +62,10 @@ class CatalogImport(models.AbstractModel):
     @api.model
     def apply_catalog_batch(self, instance, categories, products, dry_run=True):
         self._authorize()
+        return self._apply_catalog_batch(instance, categories, products, dry_run=dry_run)
+
+    def _apply_catalog_batch(self, instance, categories, products, dry_run=True):
+        """Private entry point for the authenticated application controller."""
         if (not isinstance(instance, str) or not 1 <= len(instance) <= 80
                 or not isinstance(categories, list) or not isinstance(products, list)
                 or len(categories) + len(products) > 200 or type(dry_run) is not bool):
