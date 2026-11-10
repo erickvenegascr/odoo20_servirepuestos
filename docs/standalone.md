@@ -54,7 +54,16 @@ primera ejecución es simulación; `--apply` habilita únicamente las escrituras
 del catálogo en Odoo. No reactivar el worker o timer históricos para usar este
 gateway. La [guía del catálogo](catalog.md) define el alcance y la conciliación.
 
-Para respaldar esta instalación se debe conservar la configuración privada y
+El respaldo manual `/opt/sga-gateway/backup.sh` (fuente en
+`scripts/backup_standalone.sh`) envía `pg_dump` y el tar de configuración
+directamente a age 1.3.2, sin crear copias en texto claro. Usa el destinatario
+público previamente configurado; la identidad privada queda fuera del servidor
+y de ambos repositorios. Los archivos cifrados quedan en
+`/var/backups/sga-gateway` con modo 0600 y tienen checksums SHA-256. Se conserva
+una copia externa cifrada y se verificó su descifrado e inventario de tablas.
+No se habilitó programación automática de respaldos en esta etapa.
+
+Se debe conservar la configuración privada y
 un dump de la base `gateway`, cifrados fuera del repositorio. Los scripts Docker
 de respaldo del proyecto original no corresponden a este despliegue standalone.
 El volumen o directorio de datos no sustituye a esos respaldos.
