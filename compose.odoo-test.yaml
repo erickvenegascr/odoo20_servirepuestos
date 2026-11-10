@@ -27,7 +27,7 @@ services:
     entrypoint: [/bin/bash, -ec]
     command:
       - |
-        odoo --db_host=odoo_test_db --db_user=odoo -d connector_test --data-dir=/tmp/odoo --addons-path=/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons -i sga_gateway_connector --without-demo --stop-after-init --no-http
+        odoo --db_host=odoo_test_db --db_user=odoo -d connector_test --data-dir=/tmp/odoo --addons-path=/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons -i sga_gateway_connector --without-demo --stop-after-init --no-http --test-enable --test-tags=/sga_gateway_connector
         odoo shell --db_host=odoo_test_db --db_user=odoo -d connector_test --data-dir=/tmp/odoo --addons-path=/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons --no-http < /mnt/test_odoo_immediate.py
     networks: [test]
 networks:

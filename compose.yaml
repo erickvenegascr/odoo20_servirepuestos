@@ -71,6 +71,19 @@ services:
       db: {condition: service_healthy}
       migrate: {condition: service_completed_successfully}
     command: [python, manage.py, process_queue]
+  catalog:
+    <<: *gateway
+    profiles: [catalog]
+    restart: 'no'
+    depends_on:
+      db: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    environment:
+      <<: *gateway-env
+      SGA_CATALOG_SOURCE_FILE: /run/secrets/catalog_source
+      ODOO_CATALOG_TARGET_FILE: /run/secrets/catalog_target
+    secrets: [django_secret_key, gateway_clients, postgres_password, catalog_source, catalog_target]
+    command: [python, manage.py, sync_catalog]
   test:
     <<: *gateway
     profiles: [test]
@@ -91,3 +104,7 @@ secrets:
     file: ${SECRETS_DIR:?Set SECRETS_DIR}/postgres_password.txt
   gateway_clients:
     file: ${SECRETS_DIR:?Set SECRETS_DIR}/gateway_clients.json
+  catalog_source:
+    file: ${CATALOG_SECRETS_DIR:-${SECRETS_DIR}}/catalog_source.json
+  catalog_target:
+    file: ${CATALOG_SECRETS_DIR:-${SECRETS_DIR}}/catalog_target.json

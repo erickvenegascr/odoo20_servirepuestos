@@ -1,12 +1,12 @@
 {
     'name': 'SGA Gateway Connector',
-    'version': '20.0.1.1.0',
-    'summary': 'Immediate API delivery after commit with a durable recovery outbox',
+    'version': '20.0.1.2.1',
+    'summary': 'Read-only SGA catalog import and durable gateway outbox',
     'license': 'LGPL-3',
     'author': 'Servirepuestos',
-    'depends': ['base'],
+    'depends': ['stock'],
     'external_dependencies': {'python': ['requests']},
-    'data': ['security/ir.access.csv', 'views/operation_views.xml', 'data/cron.xml'],
+    'data': ['security/catalog_group.xml', 'security/ir.access.csv', 'views/operation_views.xml', 'data/cron.xml'],
     'installable': True,
     'application': False,
 }

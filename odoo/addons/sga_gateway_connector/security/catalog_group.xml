@@ -1,0 +1,5 @@
+<odoo>
+    <record id="group_catalog_import" model="res.groups">
+        <field name="name">Sincronizar catálogo SGA</field>
+    </record>
+</odoo>
