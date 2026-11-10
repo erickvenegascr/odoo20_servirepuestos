@@ -83,7 +83,11 @@ class GatewayApplication(models.Model):
     def _touch(self):
         # Public-route callers cannot use the administrative write override.
         self.ensure_one()
-        super(GatewayApplication, self.sudo()).write({'last_seen_at': fields.Datetime.now()})
+        now = fields.Datetime.now()
+        # Catalog batches and reverse polling share this application. A heartbeat
+        # every 30 seconds avoids making its row a write hotspot on every batch.
+        if not self.last_seen_at or self.last_seen_at <= now - timedelta(seconds=30):
+            super(GatewayApplication, self.sudo()).write({'last_seen_at': now})
 
 
 class GatewayMessage(models.Model):

@@ -2,6 +2,7 @@ import hashlib
 import json
 import uuid
 from datetime import timedelta
+from unittest.mock import patch
 
 from odoo import fields
 from odoo.tests import HttpCase, tagged
@@ -38,6 +39,36 @@ class TestApplicationApi(HttpCase):
         self.assertEqual(response.json()['authentication'], 'application_token')
         self.assertFalse(response.json()['sga_writes_enabled'])
         self.assertTrue(self.app.last_seen_at)
+
+    def test_concurrent_heartbeat_retries_entire_catalog_batch(self):
+        Application = type(self.app)
+        original = Application._touch
+        attempts = []
+
+        def touch_once_conflicted(app):
+            attempts.append(True)
+            if len(attempts) == 1:
+                app.env.cr.execute("""DO $$ BEGIN RAISE EXCEPTION
+                    'synthetic heartbeat conflict' USING ERRCODE='40001'; END $$""")
+            return original(app)
+
+        body = {'instance': self.app.source_instance, 'categories': self.nodes,
+                'products': [self.row], 'dry_run': False}
+        with patch.object(Application, '_touch', touch_once_conflicted):
+            response = self.post('catalog/batch', body)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(response.json()['created'], 1)
+        self.assertEqual(self.env['product.template'].with_context(active_test=False).search_count(
+            [('sga_catalog_instance', '=', self.app.source_instance)]), 1)
+
+    def test_heartbeat_is_throttled(self):
+        self.assertEqual(self.post('info').status_code, 200)
+        timestamp = self.app.last_seen_at
+        with patch('odoo.addons.sga_gateway_connector.models.application.fields.Datetime.now',
+                   return_value=timestamp + timedelta(seconds=5)):
+            self.assertEqual(self.post('info').status_code, 200)
+        self.assertEqual(self.app.last_seen_at, timestamp)
 
     def test_missing_invalid_and_native_api_keys_rejected(self):
         for token in ['', 'personal-api-key', 'sgw1_' + 'z' * 64]:
@@ -79,6 +110,22 @@ class TestApplicationApi(HttpCase):
         self.assertEqual(self.post('catalog/batch', body).status_code, 409)
         self.assertFalse(self.env['product.template'].search_count([('sga_catalog_instance', '=', self.app.source_instance)]))
         self.assertFalse(self.env['product.category'].search_count([('sga_catalog_instance', '=', self.app.source_instance)]))
+
+    def test_mixed_existing_and_new_articles_in_one_batch(self):
+        body = {'instance': self.app.source_instance, 'categories': self.nodes,
+                'products': [self.row], 'dry_run': False}
+        self.assertEqual(self.post('catalog/batch', body).json()['created'], 1)
+        body['products'] = [dict(self.row, name='SYNTHETIC UPDATED'),
+                            dict(self.row, article_id=89002, active=False),
+                            dict(self.row, article_id=89003)]
+        result = self.post('catalog/batch', body).json()
+        self.assertEqual((result['created'], result['updated']), (2, 1))
+        self.assertEqual(self.post('catalog/batch', body).json()['unchanged'], 3)
+        records = self.env['product.template'].with_context(active_test=False).search(
+            [('sga_catalog_instance', '=', self.app.source_instance)])
+        self.assertEqual(len(records), 3)
+        self.assertEqual(len(records.filtered('active')), 2)
+        self.assertEqual(len(records.mapped('categ_id')), 1)
 
     def test_invalid_oversized_and_nonfinite_json_rejected(self):
         for raw in [b'[]', b'{broken', b'{"x":NaN}']:

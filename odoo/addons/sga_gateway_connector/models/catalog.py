@@ -109,6 +109,7 @@ class CatalogImport(models.AbstractModel):
         seen = set()
         counts = {'categories': len(categories), 'products': len(products),
                   'created': 0, 'updated': 0, 'unchanged': 0, 'dry_run': dry_run}
+        new_products = []
         for row in products:
             article = row.get('article_id')
             if (type(article) is not int or article <= 0 or article in seen
@@ -150,5 +151,9 @@ class CatalogImport(models.AbstractModel):
                 if records:
                     records.write(tracked)
                 else:
-                    Product.create({**tracked, 'company_id': company.id})
+                    new_products.append({**tracked, 'company_id': company.id})
+        # Odoo's multi-create batches variants, defaults and recomputations. A
+        # separate create per article multiplies those costs for a full catalog.
+        if new_products:
+            Product.create(new_products)
         return counts

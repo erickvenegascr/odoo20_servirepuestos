@@ -1,6 +1,6 @@
 # Etapa 1: catálogo SGA → Odoo 20
 
-El addon `sga_gateway_connector` 20.0.1.3.0 incorpora el contrato de entrada del
+El addon `sga_gateway_connector` 20.0.1.3.2 incorpora el contrato de entrada del
 catálogo. El gateway mantiene su bandeja anterior y continúa rechazando toda
 escritura hacia SGA. Este trabajo no reactiva el monitor de migración histórica
 ni su temporizador, ni encola compras, ventas, pagos o inventario.
@@ -38,8 +38,9 @@ rollback. La única interfaz de consulta admite SELECT fijos y parametrizados.
 Se recorren todos los artículos por clave, en lotes de hasta 200. Cada nueva
 corrida reconcilia el catálogo completo: `artsservsrefer` y los catálogos de
 clasificación no ofrecen un registro de cambios completo y confiable. Un cambio
-concurrente a la instantánea se recoge en la siguiente corrida. No se habilita
-ningún sondeo automático todavía.
+concurrente a la instantánea se recoge en la siguiente corrida. El perfil Docker
+es manual. En standalone, el timer separado permite conciliar cada hora después
+de validar la carga inicial y una segunda pasada sin nuevas creaciones.
 
 ## Instalar y configurar
 
@@ -47,8 +48,9 @@ ningún sondeo automático todavía.
    instalar/actualizar el addon y verificar sus pruebas antes de cargar datos.
    El viejo `sgadata_migration` Odoo 19 no se instala sobre Odoo 20.
 2. En el gateway, reconstruir la imagen con `gateway/requirements.lock` y aplicar
-   las migraciones normales. `0002_catalogrun` crea únicamente la auditoría en
-   PostgreSQL del gateway. No hay migraciones para MariaDB.
+   las migraciones normales. `0002_catalogrun` y `0003_gatewayinbox` crean la
+   auditoría y bandeja de recepción en PostgreSQL del gateway. No hay migraciones
+   para MariaDB.
 3. Materializar fuera de Git dos archivos con permisos 0600. Incorporarlos al
    procedimiento cifrado del repositorio privado sin publicar sus valores.
 
@@ -98,7 +100,8 @@ Fuera de Docker, los mismos archivos se seleccionan con
 
 ## Reintentos, conflictos y auditoría
 
-Cada lote Odoo es una transacción completa. Las identidades únicas incluyen
+Cada lote Odoo es una transacción completa. Los artículos nuevos se crean con
+la operación nativa multi-create para compartir variantes y recomputaciones. Las identidades únicas incluyen
 instancia y compañía; las categorías también incluyen su ruta. Repetir un lote
 tras perder su respuesta no duplica productos ni categorías. El cursor de
 `CatalogRun` solo avanza después de recibir la confirmación. Una falla queda
@@ -116,7 +119,7 @@ estado, cantidades reconocidas, cursor confirmado y clase de error. Una corrida
 interrumpida abruptamente puede quedar `running`; la siguiente crea otra auditoría
 y el bloqueo de sesión anterior se libera cuando PostgreSQL cierra la conexión.
 
-## Validación pendiente del entorno real
+## Criterios de validación del entorno real
 
 La ejecución comercial requiere: acceso autorizado al servidor, cuenta SELECT
 vigente, addon instalado en la base Odoo 20 correcta y token de aplicación vigente. No se

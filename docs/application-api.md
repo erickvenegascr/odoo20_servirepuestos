@@ -1,6 +1,6 @@
 # API de aplicación: receptor Odoo y comunicación inversa
 
-`sga_gateway_connector` 20.0.1.3.0 incorpora un receptor HTTP propio, siguiendo
+`sga_gateway_connector` 20.0.1.3.2 incorpora un receptor HTTP propio, siguiendo
 el patrón de credenciales de Device Hub. No crea usuarios de Odoo ni utiliza
 claves API personales o JSON-2 para comunicar las aplicaciones.
 
@@ -22,6 +22,11 @@ Los cuerpos son objetos JSON de hasta 256 KiB. El catálogo admite hasta 200
 elementos por transacción. Cualquier conflicto o dato inválido revierte el lote
 completo. El cliente verifica base, compañía, aplicación y origen antes de leer
 SGA. No sigue redirecciones ni acepta claves API personales como fallback.
+
+Los errores de concurrencia de PostgreSQL se propagan al mecanismo nativo de
+reintento de Odoo: se revierte y repite la petición completa. La fecha de última
+conexión se actualiza como máximo cada 30 segundos para evitar conflictos entre
+los lotes del catálogo y el sondeo de la bandeja de regreso.
 
 Ejemplo del cuerpo de catálogo:
 

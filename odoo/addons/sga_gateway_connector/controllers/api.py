@@ -3,7 +3,8 @@ import logging
 
 from odoo import http
 from odoo.http import request
-from odoo.exceptions import AccessError, ValidationError
+from odoo.exceptions import AccessError, ConcurrencyError, ValidationError
+from odoo.sql_db import PG_CONCURRENCY_EXCEPTIONS_TO_RETRY
 from werkzeug.exceptions import RequestEntityTooLarge
 
 _logger = logging.getLogger(__name__)
@@ -83,6 +84,10 @@ class GatewayApi(http.Controller):
                     value = {'status': 'acknowledged', 'message_id': body['message_id']}
                 app._touch()
                 return self._json(value)
+        except (*PG_CONCURRENCY_EXCEPTIONS_TO_RETRY, ConcurrencyError):
+            # Odoo must roll back and retry the entire HTTP transaction. Turning
+            # these into an HTTP 500 suppresses its native concurrency recovery.
+            raise
         except (ValidationError, AccessError):
             return self._json({'error': 'catalog_conflict_or_invalid_values'}, 409)
         except Exception:
