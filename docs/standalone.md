@@ -22,6 +22,8 @@ zlib, ICU, LZ4 ni Zstandard. Los dumps de este PostgreSQL requieren `pg_dump -Z0
 | PostgreSQL | `sga-gateway-postgresql.service`, solo `127.0.0.1:5548` |
 | API | `sga-gateway-api.service`, solo `127.0.0.1:8096` |
 | Recuperación | `sga-gateway-worker.service` |
+| Comunicación de regreso | `sga-gateway-exchange.service`, sondeo saliente cada 15 segundos |
+| Catálogo | `sga-gateway-catalog.service`, ejecución separada del histórico |
 
 El usuario `sgapg` posee los datos PostgreSQL en modo 0700. `sgagateway`
 ejecuta Django con un rol PostgreSQL distinto, propietario únicamente de la
@@ -30,7 +32,8 @@ solo para el grupo del servicio; las credenciales nunca se imprimieron.
 La conexión SGA reutiliza `sgamigrate_ro`; SHOW GRANTS confirmó solo lectura.
 La clave Odoo anterior fue rechazada con HTTP 401 y no se reutilizó.
 
-Las migraciones `bridge.0001_initial`, `bridge.0002_catalogrun` y contenttypes
+Las migraciones `bridge.0001_initial`, `bridge.0002_catalogrun`,
+`bridge.0003_gatewayinbox` y contenttypes
 se aplicaron únicamente en PostgreSQL del gateway. `/health/ready/` devolvió
 `{"status":"ready"}`. La API no se publicó fuera de localhost. El adaptador
 de escritura SGA permanece deshabilitado y no se habilitó un timer de catálogo.
@@ -44,6 +47,7 @@ conservaron; el monitor web anterior sigue disponible para consulta.
 
 ```bash
 systemctl status sga-gateway-postgresql sga-gateway-api sga-gateway-worker
+systemctl status sga-gateway-exchange sga-gateway-catalog
 curl --fail http://127.0.0.1:8096/health/ready/
 journalctl -u sga-gateway-api -u sga-gateway-worker --since today
 ```
@@ -53,6 +57,13 @@ proceso del usuario `sgagateway`, situado en la carpeta de aplicación. La
 primera ejecución es simulación; `--apply` habilita únicamente las escrituras
 del catálogo en Odoo. No reactivar el worker o timer históricos para usar este
 gateway. La [guía del catálogo](catalog.md) define el alcance y la conciliación.
+
+El receptor Odoo usa un token de aplicación dedicado en
+`/etc/sga-gateway/odoo_application_token.txt`; Odoo guarda solo su SHA-256.
+`catalog_target.json` fija además base, compañía y UUID de aplicación. No se
+creó una cuenta Odoo ni se reutilizaron claves API personales. El intercambio
+inverso conserva mensajes y confirmaciones en PostgreSQL; responde ping/pong y
+bloquea todas las solicitudes comerciales con `SGA_READ_ONLY`.
 
 El respaldo manual `/opt/sga-gateway/backup.sh` (fuente en
 `scripts/backup_standalone.sh`) envía `pg_dump` y el tar de configuración

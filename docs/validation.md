@@ -1,28 +1,32 @@
-# Validación de la base del proyecto
+# Validación del gateway
 
-## Catálogo, 10 de noviembre de 2026
+## Catálogo y API de aplicación, 10 de noviembre de 2026
 
-- Gateway: **41 pruebas aprobadas contra PostgreSQL 17 temporal**, incluidas
-  las pruebas existentes de concurrencia y nueve verificaciones del catálogo.
-- Addon Odoo 20: **12 pruebas aprobadas**, instalado y actualizado en una base
-  temporal con el core nativo; creación, repetición, archivo/reactivación,
-  separación de compañías, conflictos locales, permisos y rollback del lote.
-  La cuenta técnica puede importar por el contrato y no puede modificar
-  productos por ORM general ni crear existencias.
-- Instalación del gateway desde dependencias fijadas con hashes completada.
-- `makemigrations --check --dry-run`, `check`, `check_repository.py`,
-  `git diff --check` y configuración Compose sin errores.
-- Las pruebas usan datos sintéticos. La cuenta MariaDB debe validarse en el
-  servidor real antes de cualquier lectura del catálogo. El usuario autorizó expresamente el acceso SSH y la instalación. El gateway
-  quedó instalado con PostgreSQL 17.11, Python 3.11 y dependencias fijadas.
-  Salud local `ready`; servicios históricos deshabilitados. La cuenta SELECT
-  se verificó y se contaron 33.039 artículos y 189 nodos de clasificación.
-  La conexión Odoo 20 espera la clave API dedicada; la clave antigua responde 401.
-- No se reanudó la migración histórica ni se escribió en SGA. No se ha
-  certificado una sincronización comercial real con estos resultados.
+- Gateway: **45 pruebas aprobadas contra PostgreSQL real**, incluidas
+  concurrencia, permisos, catálogo, bandeja durable y pérdida de confirmación.
+- Addon Odoo 20 **20.0.1.3.2**: **26 pruebas aprobadas** con el core nativo.
+  Cubren importación idempotente, separación de compañías, conflictos locales,
+  permisos, rollback completo, token inválido/revocado/rotado, límites HTTP,
+  arrendamiento y confirmación de mensajes.
+- La regresión de concurrencia genera un error PostgreSQL real SQLSTATE 40001
+  después de importar un lote. Odoo revierte y repite toda la petición y crea
+  exactamente un producto. Se comprueba también el límite de 30 segundos del
+  heartbeat compartido con el sondeo inverso.
+- La compilación de producción supera el chequeo de 89 módulos: 911 archivos
+  Python, 346 XML, 94 JavaScript y 48 CSV de permisos.
+- `makemigrations --check --dry-run`, `check` y `check_repository.py` correctos.
+- Gateway separado en Python 3.11 y PostgreSQL 17.11, dependencias fijadas con
+  hashes, API solo local y respaldos age descifrados/verificados sin guardar
+  secretos o dumps en claro.
+- Cuenta SELECT de SGA verificada: 33.039 artículos y 189 nodos de clasificación.
+  La migración histórica sigue detenida y deshabilitada. No se escribió en SGA.
+- Conexión real por token de aplicación validada; no se creó un usuario Odoo.
+  El token de aplicación recibe HTTP 401 en JSON-2 y funciona solo en su contrato.
+  Ping Odoo → gateway → Odoo confirmado con `pong / read_only`.
 
-Código: `sga_gateway_connector` **20.0.1.2.1** y migración gateway
-`0002_catalogrun`. [Alcance y despliegue](catalog.md).
+Las pruebas usan datos sintéticos. El despliegue y la conciliación real se
+registran por separado en [instalación standalone](standalone.md). El alcance
+comercial sigue limitado al [catálogo descriptivo](catalog.md).
 
 ## Base del gateway, octubre de 2026
 

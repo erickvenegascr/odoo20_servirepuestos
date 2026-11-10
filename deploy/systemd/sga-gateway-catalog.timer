@@ -1,0 +1,9 @@
+[Unit]
+Description=Read-only SGA catalog reconciliation to Odoo every hour
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=120
+Persistent=true
+Unit=sga-gateway-catalog.service
+[Install]
+WantedBy=timers.target

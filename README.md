@@ -1,6 +1,7 @@
 # Odoo 20 Servirepuestos
 
-Base de integración entre Odoo 20 y SGA con un gateway Django en Docker.
+Base de integración entre Odoo 20 y SGA con un gateway Django, desplegable en
+Docker o como [servicios separados](docs/standalone.md).
 El gateway conserva operaciones, revisiones, deduplicación y auditoría en
 PostgreSQL. El módulo Odoo envía por API inmediatamente después del commit,
 con una bandeja persistente para recuperar fallos. Los adaptadores que modifican SGA quedan bloqueados hasta

@@ -1,0 +1,19 @@
+[Unit]
+Description=SGA Odoo application exchange
+After=network-online.target sga-gateway-postgresql.service
+Requires=sga-gateway-postgresql.service
+[Service]
+Type=simple
+User=sgagateway
+Group=sgagateway
+WorkingDirectory=/opt/sga-gateway/app/gateway
+EnvironmentFile=/etc/sga-gateway/gateway.env
+ExecStart=/opt/sga-gateway/venv/bin/python manage.py exchange_odoo_gateway
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+Restart=on-failure
+RestartSec=15
+[Install]
+WantedBy=multi-user.target
