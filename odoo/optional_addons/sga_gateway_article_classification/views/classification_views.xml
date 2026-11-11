@@ -1,0 +1,28 @@
+<odoo>
+    <record id="value_list_labels" model="ir.ui.view">
+        <field name="name">product.classification.value.sga.labels</field>
+        <field name="model">product.classification.value</field>
+        <field name="inherit_id" ref="product_classification.value_list"/>
+        <field name="arch" type="xml">
+            <field name="dimension_id" position="attributes"><attribute name="string">Dimensión</attribute></field>
+            <field name="code" position="attributes"><attribute name="string">Código</attribute></field>
+            <field name="name" position="attributes"><attribute name="string">Clasificación</attribute></field>
+            <field name="active" position="attributes"><attribute name="string">Activo</attribute></field>
+        </field>
+    </record>
+    <record id="product_classification.action_values" model="ir.actions.act_window">
+        <field name="context">{'group_by': 'dimension_id'}</field>
+    </record>
+    <record id="assignment_list_active" model="ir.ui.view">
+        <field name="name">product.classification.assignment.sga.active</field>
+        <field name="model">product.classification.assignment</field>
+        <field name="inherit_id" ref="product_classification.assignment_list"/>
+        <field name="arch" type="xml"><field name="value_id" position="after"><field name="active" optional="hide" string="Activo"/></field></field>
+    </record>
+    <record id="assignment_search_archived" model="ir.ui.view">
+        <field name="name">product.classification.assignment.sga.archived</field>
+        <field name="model">product.classification.assignment</field>
+        <field name="inherit_id" ref="product_classification.assignment_search"/>
+        <field name="arch" type="xml"><search position="inside"><filter name="sga_archived" string="Archivadas" domain="[('active','=',False)]"/></search></field>
+    </record>
+</odoo>
