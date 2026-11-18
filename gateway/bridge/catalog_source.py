@@ -147,13 +147,19 @@ class CatalogSource:
             'WHERE a.Articulo > %s ORDER BY a.Articulo LIMIT %s', (after, limit))
         result = []
         for row in rows:
+            worked = row['Trabajado']
+            # SGA's price-list query labels Trabajado=1 as Inactivo and
+            # includes it alongside Trabajado=255 in the working catalog.
+            if worked not in (0, 1, 255):
+                raise ValueError(f"Unknown SGA Trabajado value for article {row['Articulo']}")
             key = (path_key('category', row['Division'], row['Categoria'])
                    if row['SubCategoria'] in (None, '') else
                    path_key('subcategory', row['Division'], row['Categoria'], row['SubCategoria']))
             result.append({
                 'article_id': int(row['Articulo']), 'name': text(row['ArticuloNomb']) or str(row['Articulo']),
                 'default_code': text(row['NombreCorto']) or str(row['Articulo']),
-                'service': bit(row['Servicio']), 'active': int(row['Trabajado'] or 0) == 255,
+                'service': bit(row['Servicio']), 'active': worked in (1, 255),
+                'source_inactive': worked == 1,
                 'category_key': key, 'units_per_pack': int(row['NumeroUnidades'] or 1),
                 'pack_uom': text(row['Unidad']), 'detail_uom': text(row['UnidadDet']),
                 'cabys': text(row['CodHacienda']), 'keywords': text(row['Atributos']),

@@ -30,6 +30,10 @@ class CatalogProduct(models.Model):
     sga_catalog_checksum = fields.Char(readonly=True, copy=False)
     sga_catalog_values = fields.Json(readonly=True, copy=False)
     sga_catalog_details = fields.Json(readonly=True, copy=False)
+    sga_catalog_source_inactive = fields.Boolean(
+        string='Inactivo en SGA', readonly=True, copy=False,
+        help='Marca de inactividad de SGA. El producto sigue activo en Odoo.',
+    )
     _sga_catalog_identity = models.Constraint(
         'UNIQUE(company_id, sga_catalog_instance, sga_catalog_article_id)',
         'The SGA article identity already exists.')
@@ -48,7 +52,8 @@ class CatalogImport(models.AbstractModel):
     def catalog_info(self):
         self._authorize()
         return {'contract': 1, 'company_id': self.env.company.id,
-                'database': self.env.cr.dbname, 'sga_writes_enabled': False}
+                'database': self.env.cr.dbname, 'sga_writes_enabled': False,
+                'supports_source_inactive': True}
 
     def _unchanged_locally(self, record, values):
         for name, expected in (record.sga_catalog_values or {}).items():
@@ -112,12 +117,15 @@ class CatalogImport(models.AbstractModel):
         new_products = []
         for row in products:
             article = row.get('article_id')
+            source_inactive = row.get('source_inactive', False)
             if (type(article) is not int or article <= 0 or article in seen
                     or not isinstance(row.get('name'), str) or not row['name'].strip()
                     or len(row['name']) > 255 or not isinstance(row.get('default_code'), str)
                     or len(row['default_code']) > 255 or type(row.get('active')) is not bool
                     or type(row.get('service')) is not bool or type(row.get('units_per_pack')) is not int
-                    or row['units_per_pack'] < 1 or not isinstance(row.get('category_key'), str)):
+                    or row['units_per_pack'] < 1 or not isinstance(row.get('category_key'), str)
+                    or type(source_inactive) is not bool
+                    or (source_inactive and not row['active'])):
                 raise ValidationError('Invalid or duplicate article identity/values.')
             seen.add(article)
             category = category_map.get(row['category_key'])
@@ -128,9 +136,13 @@ class CatalogImport(models.AbstractModel):
                                       ('company_id', '=', company.id)], limit=2)
             if len(records) > 1:
                 raise ValidationError('Duplicate SGA article binding.')
+            if records.sga_catalog_source_inactive and 'source_inactive' not in row:
+                raise ValidationError('The SGA article requires an explicit inactive flag.')
             values = {'name': row['name'], 'default_code': row['default_code'],
                       'type': 'service' if row['service'] else 'consu',
                       'is_storable': not row['service'], 'active': row['active']}
+            if 'source_inactive' in row:
+                values['sga_catalog_source_inactive'] = source_inactive
             if hasattr(Product, '_product_uppercase_name'):
                 values['name'] = Product._product_uppercase_name(values['name'])
             if category:

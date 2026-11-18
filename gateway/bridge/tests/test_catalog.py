@@ -84,6 +84,25 @@ class CatalogSafetyTests(SimpleTestCase):
             self.assertNotIn('context', post.call_args.kwargs['json'])
         client.close()
 
+    def test_product_worked_states(self):
+        source = CatalogSource({})
+        article = dict(NombreCorto='A', ArticuloNomb='Artículo', Servicio=0,
+                       Division=None, Categoria=None, SubCategoria=None,
+                       NumeroUnidades=1, Unidad='', UnidadDet='', CodHacienda='',
+                       Atributos='', NoPedir=0, Marca=None)
+        source.rows = MagicMock(return_value=[
+            dict(article, Articulo=10, Trabajado=0),
+            dict(article, Articulo=11, Trabajado=1),
+            dict(article, Articulo=12, Trabajado=255),
+        ])
+        self.assertEqual(
+            [(row['active'], row['source_inactive']) for row in source.products()],
+            [(False, False), (True, True), (True, False)],
+        )
+        source.rows.return_value = [dict(article, Articulo=13, Trabajado=None)]
+        with self.assertRaisesRegex(ValueError, 'article 13'):
+            source.products()
+
 
 class CatalogCommandTests(TestCase):
     def config(self, name):
@@ -91,7 +110,7 @@ class CatalogCommandTests(TestCase):
                 if name == 'SGA_CATALOG_SOURCE' else
                 {'url': 'https://odoo.invalid', 'database': 'synthetic-db', 'company_id': 1})
 
-    def run_command(self, fail=False, apply=False, wrong_database=False):
+    def run_command(self, fail=False, apply=False, wrong_database=False, supports_inactive=True):
         with patch('bridge.management.commands.sync_catalog.configuration', side_effect=self.config), \
              patch('bridge.management.commands.sync_catalog.CatalogSource') as source, \
              patch('bridge.management.commands.sync_catalog.CatalogOdoo') as target:
@@ -102,12 +121,17 @@ class CatalogCommandTests(TestCase):
                 if method == 'catalog_info':
                     return {'contract': 1, 'database': 'wrong' if wrong_database else 'synthetic-db',
                             'company_id': 1, 'sga_writes_enabled': False,
-                            'source_instance': 'synthetic-sga', 'authentication': 'application_token'}
+                            'source_instance': 'synthetic-sga', 'authentication': 'application_token',
+                            'supports_source_inactive': supports_inactive}
                 if kwargs['products'] and fail:
                     raise TimeoutError('synthetic lost acknowledgement')
                 return {'categories': len(kwargs['categories']), 'products': len(kwargs['products'])}
             target.return_value.call.side_effect = call
-            call_command('sync_catalog', apply=apply, stdout=StringIO())
+            try:
+                call_command('sync_catalog', apply=apply, stdout=StringIO())
+            finally:
+                if not supports_inactive:
+                    source.assert_not_called()
             return target.return_value
 
     def test_default_simulation_and_successful_audit(self):
@@ -129,4 +153,9 @@ class CatalogCommandTests(TestCase):
     def test_wrong_destination_blocks_before_source_read(self):
         with self.assertRaises(CommandError):
             self.run_command(wrong_database=True)
+        self.assertEqual(CatalogRun.objects.get().cursor, 0)
+
+    def test_receiver_without_checkbox_support_blocks_before_source_read(self):
+        with self.assertRaises(CommandError):
+            self.run_command(apply=True, supports_inactive=False)
         self.assertEqual(CatalogRun.objects.get().cursor, 0)
