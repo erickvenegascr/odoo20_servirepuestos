@@ -3,7 +3,7 @@ import hashlib
 import json
 import uuid
 
-VERSION = 1
+VERSION = 2
 MAX_ARTICLE = 2147483647
 FIELDS = frozenset({'name', 'reference', 'service', 'classification', 'barcodes'})
 CLASS_FIELDS = frozenset({'division', 'category', 'subcategory', 'brand'})
@@ -74,14 +74,17 @@ def request(value):
     required = {'contract', 'action', 'operation_id', 'product_uuid', 'source_instance',
                 'article_id', 'values', 'expected'}
     if (not isinstance(value, dict) or set(value) != required or type(value['contract']) is not int
-            or value['contract'] != VERSION or value['action'] not in ('article.create', 'article.update')):
+            or value['contract'] not in (1, VERSION) or value['action'] not in ('article.create', 'article.update')):
         raise ArticleError('INVALID_ARTICLE_REQUEST')
     result = dict(value)
     result['operation_id'] = identity(value['operation_id'])
     result['product_uuid'] = identity(value['product_uuid'])
     result['source_instance'] = text(value['source_instance'], 80, required=True)
     if value['action'] == 'article.create':
-        result['values'] = values(value['values'])
+        result['values'] = values(value['values'], legacy=value['contract'] == 2)
+        if value['contract']==2 and (result['values']['classification']['division'] is None
+                                     or result['values']['classification']['category'] is None):
+            raise ArticleError('SGA_ARTICLE_REFERENCES_REQUIRED')
         if value['article_id'] is not None or value['expected'] is not None:
             raise ArticleError('CREATE_CANNOT_SUPPLY_ARTICLE_NUMBER')
     else:
@@ -94,6 +97,12 @@ def request(value):
         if result['values']['service'] != result['expected']['service']:
             raise ArticleError('SGA_ARTICLE_TYPE_CHANGE_REQUIRES_SEPARATE_OPERATION')
     return result
+
+
+def article_code(article):
+    if type(article) is not int or not 1 <= article <= MAX_ARTICLE:
+        raise ArticleError('INVALID_SGA_ARTICLE_NUMBER')
+    return str(article).zfill(6)
 
 
 def next_article(maximum):
