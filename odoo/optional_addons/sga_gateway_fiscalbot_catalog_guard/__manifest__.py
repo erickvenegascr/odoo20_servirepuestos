@@ -1,6 +1,6 @@
 {
     'name': 'SGA: protección del catálogo fiscal en FiscalBot',
-    'version': '20.0.1.0.0',
+    'version': '20.0.1.0.1',
     'summary': 'Conserva el CABYS del catálogo SGA al importar facturas de proveedores',
     'author': 'Servirepuestos',
     'license': 'LGPL-3',
