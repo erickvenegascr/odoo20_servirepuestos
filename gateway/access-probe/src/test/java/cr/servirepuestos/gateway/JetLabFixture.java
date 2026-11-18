@@ -15,6 +15,8 @@ public final class JetLabFixture {
             if (file.exists()) { throw new IllegalArgumentException("Fixture destination exists"); }
             try (Database db = DatabaseBuilder.create(Database.FileFormat.V2000, file)) {
                 db.setDateTimeType(DateTimeType.LOCAL_DATE_TIME);
+                db.getUserDefinedProperties().put("Artículo Secuencial", true);
+                db.getUserDefinedProperties().save();
                 Table table = new TableBuilder("PGPropiedades")
                     .addColumn(new ColumnBuilder("Nombre", DataType.TEXT).setLengthInUnits(50).setCompressedUnicode(true))
                     .addColumn(new ColumnBuilder("Valor", DataType.MEMO).setCompressedUnicode(true))

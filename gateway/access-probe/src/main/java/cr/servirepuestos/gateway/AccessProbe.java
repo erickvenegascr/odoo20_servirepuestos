@@ -7,6 +7,7 @@ import com.healthmarketscience.jackcess.PropertyMap;
 import com.healthmarketscience.jackcess.Row;
 import com.healthmarketscience.jackcess.Table;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -96,7 +97,10 @@ public final class AccessProbe {
                 result = new LinkedHashMap<>(); result.put("status", "error"); result.put("code", "ACCESS_READ_FAILED");
             }
         }
-        System.out.println(new GsonBuilder().serializeNulls().create().toJson(result));
+        byte[] json = (new GsonBuilder().serializeNulls().create().toJson(result) + "\n")
+            .getBytes(StandardCharsets.UTF_8);
+        System.out.write(json, 0, json.length);
+        System.out.flush();
         if (!"inspected".equals(result.get("status"))) { System.exit(1); }
     }
 }

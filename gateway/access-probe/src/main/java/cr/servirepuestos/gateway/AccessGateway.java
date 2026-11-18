@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.time.temporal.TemporalAccessor;
 import java.util.*;
@@ -152,7 +153,10 @@ public final class AccessGateway {
         } catch (Exception ex) {
             output = map("status", "error", "code", "ACCESS_READ_FAILED");
         }
-        System.out.println(new GsonBuilder().serializeNulls().create().toJson(output));
+        byte[] json = (new GsonBuilder().serializeNulls().create().toJson(output) + "\n")
+            .getBytes(StandardCharsets.UTF_8);
+        System.out.write(json, 0, json.length);
+        System.out.flush();
         if (!"ok".equals(output.get("status"))) { System.exit(1); }
     }
 }
