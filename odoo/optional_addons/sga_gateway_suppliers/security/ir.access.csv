@@ -1,0 +1,3 @@
+id,name,model_id/id,group_id/id,operation,domain
+supplier_binding_read,Consultar proveedores SGA,model_sga_supplier_binding,purchase.group_purchase_user,r,
+supplier_company,Proveedores SGA en compañías permitidas,model_sga_supplier_binding,,r,"[('company_id', 'in', company_ids)]"

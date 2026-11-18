@@ -39,3 +39,23 @@ class TestFiscalBotCatalogGuard(TransactionCase):
         self.line(product)
         self.assertEqual(product.cabys_code, '6511600000000')
         self.assertEqual(product.cabys_description, 'ENCOMIENDA SINTÉTICA')
+
+    def test_source_vendor_code_is_preserved_but_invoice_price_can_update(self):
+        if 'sga.supplier.binding' not in self.env:
+            self.skipTest('Optional SGA supplier contract is not installed')
+        product = self.env['product.template'].create({'name': 'SUPPLIER CODE GUARD',
+            'company_id': self.env.company.id, 'sga_catalog_instance': 'synthetic-supplier-guard',
+            'sga_catalog_article_id': 502})
+        partner = self.env['res.partner'].create({'name': 'Synthetic code vendor'})
+        self.document.supplier_id = partner
+        binding = self.env['sga.supplier.binding'].create({'company_id': self.env.company.id,
+            'source_instance': 'synthetic-supplier-guard', 'vendor_code': '019', 'partner_id': partner.id})
+        info = self.env['product.supplierinfo'].create({'partner_id': partner.id, 'product_tmpl_id': product.id,
+            'sga_binding_id': binding.id, 'sga_article_id': 502, 'product_code': '000008', 'price': 20})
+        line = self.line(product)
+        line.supplier_code = 'invoice-code'
+        vals = line._prepare_supplierinfo_vals(supplierinfo=info)
+        self.assertNotIn('product_code', vals)
+        self.assertIn('price', vals)
+        self.assertEqual(line.supplier_code, 'invoice-code')
+        self.assertEqual(info.product_code, '000008')

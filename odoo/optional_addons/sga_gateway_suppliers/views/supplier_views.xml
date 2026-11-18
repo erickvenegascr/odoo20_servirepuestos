@@ -1,0 +1,27 @@
+<odoo>
+  <record id="supplier_list" model="ir.ui.view">
+    <field name="name">product.supplierinfo.sga.list</field><field name="model">product.supplierinfo</field>
+    <field name="inherit_id" ref="product.product_supplierinfo_tree_view"/>
+    <field name="arch" type="xml">
+      <field name="sequence" position="after"><field name="sequence" string="Prioridad" optional="show"/><field name="sga_vendor_code" optional="show"/></field>
+      <field name="product_code" position="attributes"><attribute name="optional">show</attribute></field>
+      <field name="product_code" position="after"><field name="sga_price_pending" optional="show"/><field name="sga_disabled" optional="hide"/><field name="sga_vendor_active" optional="hide"/></field>
+    </field>
+  </record>
+  <record id="supplier_form" model="ir.ui.view">
+    <field name="name">product.supplierinfo.sga.form</field><field name="model">product.supplierinfo</field>
+    <field name="inherit_id" ref="product.product_supplierinfo_form_view"/>
+    <field name="arch" type="xml"><xpath expr="//sheet" position="inside">
+      <group string="Relación de SGA" invisible="not sga_binding_id">
+        <field name="sga_binding_id"/><field name="sga_article_id"/><field name="sga_vendor_code"/>
+        <field name="sequence" string="Prioridad (menor = preferido)"/><field name="sga_disabled"/><field name="sga_vendor_active"/><field name="sga_price_pending"/>
+        <div class="text-muted" colspan="2">Los empates mantienen la misma prioridad. Las cotizaciones de SGA están pendientes de revisión; el precio cero no se utiliza en la selección automática.</div>
+      </group>
+    </xpath></field>
+  </record>
+  <record id="binding_list" model="ir.ui.view"><field name="name">sga.supplier.binding.list</field><field name="model">sga.supplier.binding</field><field name="arch" type="xml"><list create="0" edit="0" delete="0"><field name="vendor_code"/><field name="partner_id"/><field name="source_name"/><field name="source_active"/><field name="company_id" groups="base.group_multi_company"/></list></field></record>
+  <record id="bindings_action" model="ir.actions.act_window"><field name="name">Proveedores SGA</field><field name="res_model">sga.supplier.binding</field><field name="view_mode">list</field></record>
+  <record id="relations_action" model="ir.actions.act_window"><field name="name">Artículos y proveedores SGA</field><field name="res_model">product.supplierinfo</field><field name="view_mode">list,form</field><field name="domain">[('sga_binding_id','!=',False)]</field><field name="context">{'visible_product_tmpl_id': False}</field></record>
+  <menuitem id="bindings_menu" name="Proveedores SGA" parent="sga_gateway_connector.menu_sga_gateway" action="bindings_action" sequence="20"/>
+  <menuitem id="relations_menu" name="Artículos y proveedores" parent="sga_gateway_connector.menu_sga_gateway" action="relations_action" sequence="21"/>
+</odoo>

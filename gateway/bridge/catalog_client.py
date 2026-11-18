@@ -28,6 +28,7 @@ class CatalogOdoo:
         routes = {'catalog_info': 'info', 'apply_catalog_batch': 'catalog/batch',
                   'poll': 'exchange/poll', 'ack': 'exchange/ack',
                   'check_images': 'media/check', 'apply_image': 'media/image',
+                  'suppliers_info': 'catalog/suppliers/info', 'apply_suppliers_batch': 'catalog/suppliers/batch',
                   'details_info': 'catalog/details/info', 'apply_details_batch': 'catalog/details/batch'}
         if method not in routes:
             raise ValueError('Unsupported application contract method')
