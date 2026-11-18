@@ -1,9 +1,0 @@
-{
-  "mdb_file": "/srv/sga-fixture/SGADataLoc.mdb",
-  "smb_path": "smb://sga-fixture.invalid/sgadatos/Ver13/SGADataLoc.mdb",
-  "smb_library": "/usr/lib64/libsmbclient.so.0",
-  "smb_user": "USUARIO_SMB_EXISTENTE",
-  "smb_password_file": "/etc/sga-gateway/access-smb-password.txt",
-  "timeout_seconds": 5,
-  "numeric_properties": []
-}

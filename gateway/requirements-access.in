@@ -1,3 +1,0 @@
-# Optional direct Linux → MDB adapter; not part of the default gateway image.
-# The separately licensed native Access driver and unixODBC are also required.
-pyodbc>=5,<6; sys_platform == "linux"
