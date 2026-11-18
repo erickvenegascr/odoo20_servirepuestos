@@ -12,3 +12,7 @@ jobs:
           distribution: temurin
           java-version: '8'
       - run: mvn --batch-mode -f gateway/access-probe/pom.xml clean verify
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: PYTHONPATH=gateway python -m unittest discover -s gateway/access-probe/tests -v

@@ -1,5 +1,11 @@
 # Inspector Access de solo lectura
 
+El componente ahora incluye un [lector general de tablas y un escritor binario
+propio de laboratorio](../../docs/access-gateway.md). El inspector de esta página
+conserva su apertura de solo lectura; el escritor experimental modifica
+exclusivamente una copia privada nueva y todavía no implementa los bloqueos
+compartidos de SGA.
+
 Herramienta libre para localizar candidatos al consecutivo de artículos en un
 MDB desde Linux, sin instalar Access, ODBC comercial ni un agente Windows.
 **No crea artículos ni actualiza consecutivos.** El gateway conserva deshabilitada
