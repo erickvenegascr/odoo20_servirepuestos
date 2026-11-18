@@ -89,6 +89,16 @@ class JetGatewayTests(unittest.TestCase):
             with self.assertRaises(AccessError):
                 self.gateway.read_rows(self.source, 'Catalog', ['Id'], **arguments)
 
+    def test_cli_json_is_utf8_under_an_ascii_java_locale(self):
+        prefix = [self.java, '-Dfile.encoding=US-ASCII', '-cp', str(self.jar)]
+        result = subprocess.run(prefix + ['cr.servirepuestos.gateway.AccessGateway',
+            'read', str(self.source), 'Catalog', 'Description', '0', '1'],
+            capture_output=True, encoding='utf-8', check=True, timeout=15)
+        self.assertEqual(json.loads(result.stdout)['rows'][0]['Description'], 'Artículo ñ')
+        probe = subprocess.run(prefix + ['cr.servirepuestos.gateway.AccessProbe', str(self.source)],
+            capture_output=True, encoding='utf-8', check=True, timeout=15)
+        self.assertIn('Artículo Secuencial', [row['name'] for row in json.loads(probe.stdout)['candidates']])
+
     def test_own_writer_updates_real_jet_and_preserves_other_data_and_index(self):
         self.create()
         before = (self.lab / 'data.mdb').read_bytes()
