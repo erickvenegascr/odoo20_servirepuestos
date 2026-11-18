@@ -1,0 +1,14 @@
+{
+  "enabled": false,
+  "application_id": "00000000-0000-4000-8000-000000000000",
+  "source_instance": "CONFIGURE_SOURCE_INSTANCE",
+  "host": "127.0.0.1",
+  "port": 3306,
+  "database": "sgadata",
+  "integration_schema": "sga_article_integration",
+  "user": "sga_article_writer",
+  "password": "CONFIGURE_PRIVATE_SECRET",
+  "audit_mode": "transaction_receipt",
+  "audit_user": "ODOO",
+  "audit_station": 0
+}

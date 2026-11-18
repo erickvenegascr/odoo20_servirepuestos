@@ -27,6 +27,7 @@ class CatalogOdoo:
     def call(self, method, **kwargs):
         routes = {'catalog_info': 'info', 'apply_catalog_batch': 'catalog/batch',
                   'poll': 'exchange/poll', 'ack': 'exchange/ack',
+                  'article_cards': 'articles/cards',
                   'check_images': 'media/check', 'apply_image': 'media/image',
                   'suppliers_info': 'catalog/suppliers/info', 'apply_suppliers_batch': 'catalog/suppliers/batch',
                   'details_info': 'catalog/details/info', 'apply_details_batch': 'catalog/details/batch'}

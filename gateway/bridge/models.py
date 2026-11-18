@@ -118,3 +118,10 @@ class SupplierRelationRun(models.Model):
     vendor_counts = models.JSONField(default=dict)
     error_code = models.CharField(max_length=80, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+class ArticleSweep(models.Model):
+    application_uuid = models.UUIDField(unique=True)
+    source_instance = models.CharField(max_length=80)
+    after_article = models.PositiveIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)

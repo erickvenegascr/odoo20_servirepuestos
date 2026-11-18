@@ -1,6 +1,6 @@
 # Alta y sincronización bidireccional de productos
 
-Estado: análisis del asignador confirmado; alta y edición Odoo → SGA aún no habilitadas. El lector Access y el prototipo Jet privado no constituyen un adaptador comercial de productos.
+Estado: asignador confirmado y adaptador opcional implementado y probado con datos ficticios; alta y edición Odoo → SGA aún no habilitadas en producción. El lector Access y el prototipo Jet privado no constituyen un adaptador comercial de productos.
 
 ## Alcance acordado
 
@@ -69,3 +69,8 @@ Los UUID y revisiones impiden duplicados y ciclos. La adopción se hace por el v
 La modificación experimental de Memo del gateway pasó una lectura independiente con DAO 3.6 sobre una base sintética: valor esperado, búsqueda por clave primaria, demás filas conservadas y hash sin cambios durante la lectura. Esa prueba no certifica bloqueos de escritura Jet compartidos ni un alta comercial.
 
 El módulo de flujo Odoo debe mantenerse separado del adaptador SGA. Desconectar el adaptador exige resolver su cola y conservar productos, códigos y correspondencias. La herramienta Java de precios permanece fuera de estas escrituras de ficha.
+
+
+## Implementación opcional
+
+El módulo Odoo y el escritor de fichas están implementados, deshabilitados por defecto. La guía [product-sync-adapter.md](product-sync-adapter.md) describe el contrato, los permisos por columna, las pruebas y los límites. La certificación con el formulario nativo y su auditoría sigue pendiente antes de activar producción.
