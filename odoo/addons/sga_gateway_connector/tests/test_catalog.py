@@ -49,6 +49,28 @@ class TestCatalog(TransactionCase):
         self.apply(self.nodes, [self.article])
         self.assertEqual(self.product().ids, [first])
 
+    def test_sga_inactive_reactivates_existing_product_and_preserves_identity(self):
+        old_row = dict(self.article, active=False)
+        self.apply(self.nodes, [old_row])
+        product = self.product()
+        inactive_row = dict(self.article, active=True, source_inactive=True)
+        self.assertEqual(self.apply(products=[inactive_row], dry_run=True)['updated'], 1)
+        self.assertFalse(product.active)
+        self.assertEqual(self.apply(products=[inactive_row])['updated'], 1)
+        self.assertEqual(self.product(), product)
+        self.assertTrue(product.active)
+        self.assertTrue(product.sga_catalog_source_inactive)
+        self.assertEqual(self.apply(products=[inactive_row])['unchanged'], 1)
+        with self.assertRaises(ValidationError):
+            self.apply(products=[old_row])
+        with self.assertRaises(ValidationError):
+            self.apply(products=[dict(inactive_row, active=False)])
+        self.assertTrue(product.active)
+        self.assertTrue(product.sga_catalog_source_inactive)
+        self.apply(products=[dict(self.article, active=False, source_inactive=False)])
+        self.assertFalse(product.active)
+        self.assertFalse(product.sga_catalog_source_inactive)
+
     def test_local_product_edit_blocks_source_overwrite(self):
         self.apply(self.nodes, [self.article])
         self.product().name = 'EDITADO EN ODOO'

@@ -54,6 +54,8 @@ class Command(BaseCommand):
                     or info.get('source_instance') != instance or info.get('authentication') != 'application_token'
                     or (target.get('application_id') and info.get('application_id') != target['application_id'])):
                 raise ValueError('Odoo catalog contract/company mismatch')
+            if info.get('supports_source_inactive') is not True:
+                raise ValueError('The Odoo catalog must support the SGA inactive checkbox')
             with CatalogSource(source_config) as source:
                 nodes = source.categories()
                 for offset in range(0, len(nodes), size):

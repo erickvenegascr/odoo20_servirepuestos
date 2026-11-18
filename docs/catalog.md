@@ -23,8 +23,11 @@ documentos. Las fotografías usan el complemento separado explicado abajo.
 Los valores comerciales existentes se conservan. Los nuevos
 productos usan los valores predeterminados nativos del entorno; deben permanecer
 fuera de operación comercial hasta homologar tarifas, impuestos y unidades.
-No se elimina ni archiva un artículo por desaparecer de una lectura. Solo se
-replica la marca de actividad presente en SGA (`Trabajado=255`).
+No se elimina ni archiva un artículo por desaparecer de una lectura.
+`Trabajado=0` archiva el artículo, `255` lo mantiene activo y `1` lo mantiene
+activo con la casilla «Inactivo en SGA». Un valor distinto se rechaza para
+evitar cambios de estado sin evidencia. Actualice el receptor de Odoo antes
+del gateway. El comando verifica la compatibilidad antes de leer SGA.
 
 ## Protección del origen
 

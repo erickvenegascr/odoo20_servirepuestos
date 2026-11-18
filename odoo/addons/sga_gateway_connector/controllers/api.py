@@ -61,6 +61,7 @@ class GatewayApi(http.Controller):
                     value = {'contract': 1, 'company_id': app.company_id.id,
                              'database': request.env.cr.dbname, 'application_id': app.application_uuid,
                              'source_instance': app.source_instance, 'sga_writes_enabled': False,
+                             'supports_source_inactive': True,
                              'media_contract': int('sga.media.import' in request.env.registry),
                              'authentication': 'application_token', 'reverse_transport': 'durable_poll'}
                 elif action == 'catalog':
