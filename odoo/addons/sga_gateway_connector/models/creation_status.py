@@ -43,7 +43,7 @@ class Product(models.Model):
             product.sga_creation_state = 'linked' if linked else 'not_sent' if enabled else 'disabled'
             product.sga_reference_deferred = bool(app and not linked)
             product.sga_creation_message = (
-                'Artículo vinculado a SGA: %s.' % product.sga_catalog_article_id if linked else
+                'Artículo vinculado a SGA: %s.' % str(product.sga_catalog_article_id).zfill(6) if linked else
                 'Solo guardado en Odoo. Inicie el alta en SGA para obtener su código definitivo.' if enabled else
                 'Solo guardado en Odoo. El alta en SGA está deshabilitada; el código definitivo está pendiente.')
 
