@@ -58,7 +58,9 @@ class PurchaseBridge:
 
     def _common(self, payload):
         if (not isinstance(payload, dict) or type(payload.get('contract')) is not int
-                or payload['contract'] != 1 or payload.get('action') not in ACTIONS
+                or payload['contract'] not in (1, 2)
+                or not isinstance(payload.get('action'), str) or payload['action'] not in ACTIONS
+                or payload['contract'] == 2 and payload['action'] not in ('purchase.receive', 'price.publish')
                 or payload.get('application_id') != self.application_id
                 or payload.get('source_instance') != self.source_instance):
             raise ValueError('Purchase operation/source scope mismatch')

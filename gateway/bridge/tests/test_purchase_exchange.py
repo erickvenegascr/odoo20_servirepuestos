@@ -6,6 +6,7 @@ from django.test import TestCase, SimpleTestCase
 from bridge.models import GatewayInbox
 from bridge.purchase_exchange import PurchaseBridge
 from bridge.purchase_effects_contract import NativeResultUnknown
+from bridge.tests.test_purchase_effects_contract import receive_request_v2
 from bridge.services_exchange import exchange_once
 
 
@@ -58,6 +59,21 @@ class PurchaseBridgeTests(SimpleTestCase):
     def test_native_order_writer_is_explicitly_blocked(self):
         self.payload['action'] = 'purchase.upsert'
         self.assertEqual('BLOCKED_NATIVE_PURCHASE_NOT_CERTIFIED', self.bridge.apply(self.payload)['code'])
+        self.factory.assert_not_called()
+
+    def test_fiscal_v2_uses_effects_boundary_without_reading_source(self):
+        payload = receive_request_v2()
+        payload.update(application_id=self.payload['application_id'], source_instance='lab')
+        result = self.bridge.apply(payload)
+        self.assertEqual('blocked', result['status'])
+        self.assertEqual(2, result['contract'])
+        self.assertEqual('BLOCKED_NATIVE_PURCHASE_NOT_CERTIFIED', result['code'])
+        self.factory.assert_not_called()
+
+    def test_read_contract_cannot_be_upgraded_implicitly(self):
+        self.payload['contract'] = 2
+        with self.assertRaises(ValueError):
+            self.bridge.apply(self.payload)
         self.factory.assert_not_called()
 
     def test_large_page_is_cut_only_between_complete_orders(self):

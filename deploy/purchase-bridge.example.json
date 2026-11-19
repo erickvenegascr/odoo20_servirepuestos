@@ -4,7 +4,7 @@
   "source_instance": "replace-with-verified-source",
   "source_file": "/etc/sga-gateway/catalog-source.json",
   "currency_map": {"$": "USD", "¢": "CRC"},
-  "national_currency_code": null,
+  "national_currency_code": "¢",
   "replenishment_worked": null,
   "replenishment_retained": null,
   "replenishment_query_verified": false

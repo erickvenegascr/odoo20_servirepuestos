@@ -12,11 +12,12 @@ import json
 import math
 import re
 import uuid
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
+from xml.etree import ElementTree
 
 
-VERSION = 1
+VERSION = 2
 MAX_ID = 2147483647
 MAX_SMALLINT = 32767
 MAX_LINES = 500
@@ -38,6 +39,16 @@ PRICE_FIELDS = {
     'article_id', 'level', 'currency', 'unit_price_excluded_tax', 'vat_code',
     'vat_rate', 'document_id',
 }
+FISCAL_FIELDS = {'xml_sha256', 'issued_at', 'physical_receipt_date', 'source_currency',
+    'source_exchange_rate', 'exchange_rate', 'payment_terms', 'vat_refund',
+    'other_charges', 'lines'}
+FISCAL_LINE_FIELDS = {'xml_line_id', 'xml_sequence', 'cabys', 'inventory_effect',
+    'quantity', 'quantity_base', 'conversion_factor', 'conversion_mode', 'unit_price',
+    'gross_amount', 'discounts', 'net_amount', 'taxes', 'assumed_tax_amount',
+    'net_tax_amount', 'promotion', 'allocation_ids'}
+TAX_FIELDS = {'code', 'rate_code', 'rate', 'base_amount', 'amount', 'net_amount',
+    'exoneration_percentage', 'exoneration_amount', 'included_in_cost', 'exoneration_xml'}
+TERMS_FIELDS = {'condition_code', 'credit_days', 'due_date', 'due_date_source'}
 PAYABLE_FIELDS = {'invoice_key', 'primary_key', 'detail_keys', 'currency', 'amount_total'}
 NATIVE_LINE_FIELDS = LINE_FIELDS - {'unit_factor', 'unit_cost'} | {
     'receipt_id', 'cost_confirmed', 'average_cost_base',
@@ -153,8 +164,8 @@ def _order_key(value, order_id=None):
     return value
 
 
-def receipt(value):
-    _keys(value, RECEIPT_FIELDS, 'INVALID_PURCHASE_RECEIPT_FIELDS')
+def receipt(value, *, version=1):
+    _keys(value, RECEIPT_FIELDS | ({'fiscal'} if version == 2 else set()), 'INVALID_PURCHASE_RECEIPT_FIELDS')
     _text(value['invoice_key'], 128, 'INVALID_PURCHASE_INVOICE_KEY')
     _text(value['invoice_number'], 20, 'PURCHASE_INVOICE_NUMBER_EXCEEDS_SGA_FORMAT')
     _text(value['invoice_date'], 10, 'INVALID_PURCHASE_INVOICE_DATE')
@@ -170,7 +181,7 @@ def receipt(value):
     totals = value['totals']
     _keys(totals, {'untaxed', 'tax', 'total'}, 'INVALID_PURCHASE_INVOICE_TOTALS')
     amounts = {key: _number(amount) for key, amount in totals.items()}
-    if abs(amounts['untaxed'] + amounts['tax'] - amounts['total']) > MONEY_TOLERANCE:
+    if version == 1 and abs(amounts['untaxed'] + amounts['tax'] - amounts['total']) > MONEY_TOLERANCE:
         _fail('PURCHASE_INVOICE_TOTALS_MISMATCH')
     lines = value['lines']
     if not isinstance(lines, list) or not 1 <= len(lines) <= MAX_LINES:
@@ -202,7 +213,7 @@ def receipt(value):
         conditions = (factor, unit_cost, cost_base)
         if group_key in grouped:
             prior_conditions, total_quantity = grouped[group_key]
-            if conditions != prior_conditions:
+            if version == 1 and conditions != prior_conditions:
                 _fail('PURCHASE_RECEIPT_NATIVE_KEY_CONFLICT')
             _integer(total_quantity + quantity)
             grouped[group_key] = (conditions, total_quantity + quantity)
@@ -214,14 +225,272 @@ def receipt(value):
     # Each native unit cost and the header amount may round by half a 4-decimal
     # quantum; do not enlarge this bound using a commercial/currency tolerance.
     precision_bound = NATIVE_HALF_QUANTUM * (native_units + 1)
-    if abs(allocated_untaxed - amounts['untaxed']) > precision_bound:
+    if version == 1 and abs(allocated_untaxed - amounts['untaxed']) > precision_bound:
         _fail('PURCHASE_RECEIPT_UNTAXED_ALLOCATION_MISMATCH')
+    if version == 2:
+        fiscal(value)
     # Retain exact JSON numbers: never silently change the frozen invoice/hash.
     return copy.deepcopy(value)
 
 
-def price(value):
-    _keys(value, PRICE_FIELDS, 'INVALID_PURCHASE_PRICE_FIELDS')
+def _crc(currency, exchange_rate):
+    _currency(currency)
+    if currency != 'CRC' or _number(exchange_rate) != 1:
+        _fail('PURCHASE_EFFECT_CRC_IDENTITY_RATE_REQUIRED')
+
+
+def _iso_date(value):
+    _text(value, 10, 'INVALID_PURCHASE_FISCAL_DATE')
+    try:
+        if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', value):
+            raise ValueError()
+        return date.fromisoformat(value)
+    except ValueError:
+        _fail('INVALID_PURCHASE_FISCAL_DATE')
+
+
+def _source_text(value, maximum, *, empty=False):
+    # XML source text is audit material, not a native VARCHAR to normalize.
+    if (not isinstance(value, str) or not empty and not value or len(value) > maximum
+            or any((ord(c) < 32 and c not in '\t\r\n') or 0xD800 <= ord(c) <= 0xDFFF for c in value)):
+        _fail('INVALID_PURCHASE_FISCAL_SOURCE_TEXT')
+    return value
+
+
+def _fragment(value, root):
+    _source_text(value, 65536)
+    # No external resolution, DTD or entity declarations in audit fragments.
+    if re.search(r'<!\s*(?:DOCTYPE|ENTITY)\b', value, re.I):
+        _fail('UNSAFE_PURCHASE_FISCAL_XML_FRAGMENT')
+    try:
+        element = ElementTree.fromstring(value)
+    except (ElementTree.ParseError, ValueError):
+        _fail('INVALID_PURCHASE_FISCAL_XML_FRAGMENT')
+    if element.tag.rsplit('}', 1)[-1] != root:
+        _fail('INVALID_PURCHASE_FISCAL_XML_FRAGMENT_ROOT')
+
+
+def _fiscal_code(value, *, optional=False):
+    if value is None and optional:
+        return
+    if not isinstance(value, str) or not re.fullmatch(r'[0-9]{2}', value):
+        _fail('INVALID_PURCHASE_FISCAL_CODE')
+
+
+def _list(value, maximum=MAX_LINES):
+    if not isinstance(value, list) or len(value) > maximum:
+        _fail('INVALID_PURCHASE_FISCAL_COLLECTION')
+    return value
+
+
+def _money_matches(actual, expected, code):
+    if abs(actual - expected) > MONEY_TOLERANCE:
+        _fail(code)
+
+
+def _terms(value, invoice_date):
+    _keys(value, TERMS_FIELDS, 'INVALID_PURCHASE_PAYMENT_TERMS')
+    _fiscal_code(value['condition_code'])
+    _id(value['credit_days'], MAX_SMALLINT, 0)
+    due = _iso_date(value['due_date'])
+    if (value['due_date_source'] not in ('xml', 'odoo_credit_days', 'cash_issue_date')
+            or due < invoice_date):
+        _fail('INVALID_PURCHASE_PAYMENT_DUE_DATE')
+    # Cash is the only prospective execution case. Credit terms are transported
+    # as a proposal, without claiming that SGA computes due dates this way.
+    if value['condition_code'] == '01':
+        if value['credit_days'] != 0 or due != invoice_date:
+            _fail('PURCHASE_CASH_TERMS_MISMATCH')
+    elif value['due_date_source'] == 'cash_issue_date':
+        _fail('INVALID_PURCHASE_PAYMENT_DUE_DATE_SOURCE')
+
+
+def fiscal(receipt_value):
+    """Validate complete XML amounts and explicit allocations; never calculate IVA.
+
+    Legal fragments and the original decoded XML digest preserve information the
+    older ORM tax projection omits. They are transported, not interpreted as a
+    certified SGA tax/cost/credit algorithm. Special cases remain execution-blocked.
+    """
+    value = receipt_value['fiscal']
+    _keys(value, FISCAL_FIELDS, 'INVALID_PURCHASE_FISCAL_FIELDS')
+    if not isinstance(receipt_value['invoice_key'], str) or not re.fullmatch(r'[0-9]{50}', receipt_value['invoice_key']):
+        _fail('PURCHASE_FISCAL_KEY_REQUIRED')
+    _checksum(value['xml_sha256'])
+    _crc(receipt_value['currency'], value['exchange_rate'])
+    if value['source_currency'] != 'CRC':
+        _fail('PURCHASE_EFFECT_CRC_SOURCE_REQUIRED')
+    if value['source_exchange_rate'] is not None and _number(value['source_exchange_rate']) != 1:
+        _fail('PURCHASE_EFFECT_CRC_SOURCE_RATE_MISMATCH')
+    issued = _text(value['issued_at'], 64, 'INVALID_PURCHASE_FISCAL_ISSUED_AT')
+    try:
+        if not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})', issued):
+            raise ValueError()
+        issued_at = datetime.fromisoformat(issued.replace('Z', '+00:00'))
+        if issued_at.utcoffset() is None or issued_at.date() != _iso_date(receipt_value['invoice_date']):
+            raise ValueError()
+    except ValueError:
+        _fail('INVALID_PURCHASE_FISCAL_ISSUED_AT')
+    _iso_date(value['physical_receipt_date'])
+    _terms(value['payment_terms'], issued_at.date())
+    refund = _number(value['vat_refund'])
+    charge_total, charge_ids = Decimal(0), set()
+    for charge in _list(value['other_charges']):
+        _keys(charge, {'xml_index', 'type', 'detail', 'percentage', 'amount', 'source_xml'},
+              'INVALID_PURCHASE_FISCAL_OTHER_CHARGE')
+        _id(charge['xml_index'])
+        if charge['xml_index'] in charge_ids:
+            _fail('DUPLICATE_PURCHASE_FISCAL_OTHER_CHARGE')
+        charge_ids.add(charge['xml_index'])
+        _fiscal_code(charge['type'])
+        _source_text(charge['detail'], 4096, empty=True)
+        if charge['percentage'] is not None:
+            _number(charge['percentage'])
+        charge_total += _number(charge['amount'])
+        _fragment(charge['source_xml'], 'OtrosCargos')
+    sources = _list(value['lines'])
+    if not sources:
+        _fail('PURCHASE_FISCAL_LINES_REQUIRED')
+    allocations = {line['allocation_id']: line for line in receipt_value['lines']}
+    used_allocations, source_ids, sequences, promotions = set(), set(), set(), []
+    net_total, tax_total = Decimal(0), Decimal(0)
+    for source in sources:
+        _keys(source, FISCAL_LINE_FIELDS, 'INVALID_PURCHASE_FISCAL_LINE_FIELDS')
+        _id(source['xml_line_id']); _id(source['xml_sequence'])
+        source_id = source['xml_line_id']
+        if source_id in source_ids or source['xml_sequence'] in sequences:
+            _fail('DUPLICATE_PURCHASE_FISCAL_LINE')
+        source_ids.add(source_id); sequences.add(source['xml_sequence'])
+        if not isinstance(source['cabys'], str) or not re.fullmatch(r'[0-9]{13}', source['cabys']):
+            _fail('INVALID_PURCHASE_FISCAL_CABYS')
+        quantity = _number(source['quantity'])
+        if not quantity:
+            _fail('INVALID_PURCHASE_FISCAL_QUANTITY')
+        gross = _number(source['gross_amount']); net = _number(source['net_amount'])
+        unit_price = _number(source['unit_price'])
+        _money_matches(quantity * unit_price, gross, 'PURCHASE_FISCAL_GROSS_MISMATCH')
+        discounts = Decimal(0)
+        for discount in _list(source['discounts']):
+            _keys(discount, {'code', 'amount', 'nature', 'source_xml'}, 'INVALID_PURCHASE_FISCAL_DISCOUNT')
+            _fiscal_code(discount['code'], optional=True)
+            _source_text(discount['nature'], 4096, empty=True)
+            discounts += _number(discount['amount'])
+            _fragment(discount['source_xml'], 'Descuento')
+        if discounts > gross + MONEY_TOLERANCE:
+            _fail('PURCHASE_FISCAL_DISCOUNT_EXCEEDS_GROSS')
+        _money_matches(gross - discounts, net, 'PURCHASE_FISCAL_NET_MISMATCH')
+        line_tax = Decimal(0)
+        for tax in _list(source['taxes']):
+            _keys(tax, TAX_FIELDS, 'INVALID_PURCHASE_FISCAL_TAX')
+            _fiscal_code(tax['code']); _fiscal_code(tax['rate_code'], optional=True)
+            for field in ('rate', 'base_amount'):
+                _number(tax[field])
+            amount = _number(tax['amount']); exempt = _number(tax['exoneration_amount'])
+            if tax['exoneration_percentage'] is not None:
+                _number(tax['exoneration_percentage'], maximum=Decimal(100))
+            if type(tax['included_in_cost']) is not bool or exempt > amount:
+                _fail('INVALID_PURCHASE_FISCAL_TAX')
+            _money_matches(amount - exempt, _number(tax['net_amount']), 'PURCHASE_FISCAL_TAX_NET_MISMATCH')
+            if tax['exoneration_xml'] is not None:
+                _fragment(tax['exoneration_xml'], 'Exoneracion')
+            elif exempt or tax['exoneration_percentage']:
+                _fail('PURCHASE_FISCAL_EXONERATION_SOURCE_REQUIRED')
+            line_tax += _number(tax['net_amount'])
+        assumed = _number(source['assumed_tax_amount'])
+        if assumed > line_tax + MONEY_TOLERANCE:
+            _fail('PURCHASE_FISCAL_ASSUMED_TAX_EXCEEDS_TAX')
+        _money_matches(line_tax - assumed, _number(source['net_tax_amount']), 'PURCHASE_FISCAL_LINE_TAX_MISMATCH')
+        promotion = source['promotion']
+        _keys(promotion, {'type', 'parent_xml_line_id'}, 'INVALID_PURCHASE_FISCAL_PROMOTION')
+        if promotion['type'] is not None:
+            _text(promotion['type'], 64, 'INVALID_PURCHASE_FISCAL_PROMOTION')
+        if promotion['parent_xml_line_id'] is not None:
+            _id(promotion['parent_xml_line_id'])
+            if promotion['type'] is None or promotion['parent_xml_line_id'] == source_id:
+                _fail('INVALID_PURCHASE_FISCAL_PROMOTION')
+            promotions.append((source_id, promotion['parent_xml_line_id']))
+        ids = _list(source['allocation_ids'])
+        if source['inventory_effect'] == 'none':
+            if ids or any(source[field] is not None for field in ('quantity_base', 'conversion_factor', 'conversion_mode')):
+                _fail('PURCHASE_NON_STOCK_FISCAL_ALLOCATION_FORBIDDEN')
+        elif source['inventory_effect'] == 'receive':
+            base_quantity = _integer(source['quantity_base'])
+            factor = _number(source['conversion_factor'])
+            if not factor or source['conversion_mode'] not in ('multiply', 'divide'):
+                _fail('INVALID_PURCHASE_FISCAL_CONVERSION')
+            converted = quantity * factor if source['conversion_mode'] == 'multiply' else quantity / factor
+            if abs(converted - base_quantity) > Decimal('0.00000001'):
+                _fail('PURCHASE_FISCAL_CONVERSION_MISMATCH')
+            if not ids:
+                _fail('PURCHASE_FISCAL_ALLOCATION_REQUIRED')
+            allocated_quantity, allocated_net, native_quantity = 0, Decimal(0), 0
+            for allocation_id in ids:
+                _text(allocation_id, 128, 'INVALID_PURCHASE_ALLOCATION')
+                if allocation_id in used_allocations or allocation_id not in allocations:
+                    _fail('PURCHASE_FISCAL_ALLOCATION_IDENTITY_MISMATCH')
+                allocation = allocations[allocation_id]
+                if allocation['xml_line_id'] != source_id:
+                    _fail('PURCHASE_FISCAL_ALLOCATION_IDENTITY_MISMATCH')
+                used_allocations.add(allocation_id)
+                allocated_quantity += _integer(allocation['quantity_base'])
+                allocated_net += _number(allocation['unit_cost']) * _integer(allocation['quantity'])
+                native_quantity += _integer(allocation['quantity'])
+            if allocated_quantity != base_quantity:
+                _fail('PURCHASE_FISCAL_ALLOCATION_QUANTITY_MISMATCH')
+            if abs(allocated_net - net) > NATIVE_HALF_QUANTUM * (native_quantity + 1):
+                _fail('PURCHASE_RECEIPT_UNTAXED_ALLOCATION_MISMATCH')
+        else:
+            _fail('INVALID_PURCHASE_FISCAL_INVENTORY_EFFECT')
+        net_total += net; tax_total += _number(source['net_tax_amount'])
+    if used_allocations != set(allocations):
+        _fail('PURCHASE_FISCAL_UNCOVERED_STOCK_ALLOCATION')
+    parents = dict(promotions)
+    for source_id, parent in promotions:
+        if parent not in source_ids or parent in parents:
+            _fail('PURCHASE_FISCAL_PROMOTION_PARENT_INVALID')
+    totals = receipt_value['totals']
+    _money_matches(net_total, _number(totals['untaxed']), 'PURCHASE_FISCAL_UNTAXED_TOTAL_MISMATCH')
+    _money_matches(tax_total, _number(totals['tax']), 'PURCHASE_FISCAL_TAX_TOTAL_MISMATCH')
+    if refund > tax_total + MONEY_TOLERANCE:
+        _fail('PURCHASE_FISCAL_REFUND_EXCEEDS_TAX')
+    _money_matches(net_total + tax_total + charge_total - refund, _number(totals['total']),
+                   'PURCHASE_FISCAL_DOCUMENT_TOTAL_MISMATCH')
+    return copy.deepcopy(value)
+
+
+def execution_blockers(payload):
+    """Pure capability policy, separate from validity of transported source data."""
+    operation = request(payload)
+    if operation['contract'] == 1:
+        return ['BLOCKED_PURCHASE_FISCAL_V2_REQUIRED']
+    if operation['action'] == 'price.publish':
+        return []
+    value = operation['receipt']['fiscal']; blockers = []
+    if value['other_charges'] or value['vat_refund']:
+        blockers.append('BLOCKED_PURCHASE_CHARGES_REFUND_NOT_CERTIFIED')
+    if value['payment_terms']['condition_code'] != '01':
+        blockers.append('BLOCKED_PURCHASE_CREDIT_NOT_CERTIFIED')
+    for source in value['lines']:
+        if source['inventory_effect'] == 'none':
+            blockers.append('BLOCKED_PURCHASE_NON_STOCK_FISCAL_NOT_CERTIFIED')
+        if source['taxes'] or source['assumed_tax_amount'] or source['net_tax_amount']:
+            blockers.append('BLOCKED_PURCHASE_TAX_NOT_CERTIFIED')
+        if source['discounts']:
+            blockers.append('BLOCKED_PURCHASE_DISCOUNT_NOT_CERTIFIED')
+        if source['promotion']['type'] is not None:
+            blockers.append('BLOCKED_PURCHASE_PROMOTION_NOT_CERTIFIED')
+    native_keys = {}
+    for allocation in operation['receipt']['lines']:
+        key = tuple(allocation['order_line_key'])
+        costs = (allocation['unit_factor'], allocation['unit_cost'], allocation['unit_cost_base'])
+        if key in native_keys and native_keys[key] != costs:
+            blockers.append('BLOCKED_PURCHASE_NATIVE_SPLIT_NOT_CERTIFIED')
+        native_keys[key] = costs
+    return sorted(set(blockers))
+
+
+def price(value, *, version=1):
+    _keys(value, PRICE_FIELDS | ({'exchange_rate'} if version == 2 else set()), 'INVALID_PURCHASE_PRICE_FIELDS')
     _id(value['article_id']); _id(value['level'], MAX_SMALLINT)
     _id(value['document_id']); _currency(value['currency'])
     _number(value['unit_price_excluded_tax'])
@@ -229,12 +498,14 @@ def price(value):
     if (not isinstance(value['vat_code'], str) or value['vat_code'] not in VAT_RATES
             or rate != Decimal(str(VAT_RATES[value['vat_code']]))):
         _fail('INVALID_PURCHASE_PRICE_VAT')
+    if version == 2:
+        _crc(value['currency'], value['exchange_rate'])
     return copy.deepcopy(value)
 
 
 def request(value):
     if (not isinstance(value, dict) or type(value.get('contract')) is not int
-            or value['contract'] != VERSION or not isinstance(value.get('action'), str)
+            or value['contract'] not in (1, VERSION) or not isinstance(value.get('action'), str)
             or value['action'] not in ACTIONS):
         _fail('INVALID_PURCHASE_EFFECT_REQUEST')
     body_name = 'receipt' if value['action'] == 'purchase.receive' else 'price'
@@ -244,14 +515,16 @@ def request(value):
         result[name] = _identity(value[name])
     _text(value['source_instance'], 80, 'INVALID_PURCHASE_EFFECT_SOURCE')
     _checksum(value['request_checksum'])
-    result[body_name] = receipt(value[body_name]) if body_name == 'receipt' else price(value[body_name])
+    result[body_name] = (receipt(value[body_name], version=value['contract']) if body_name == 'receipt'
+                         else price(value[body_name], version=value['contract']))
     if digest(result[body_name]) != value['request_checksum']:
         _fail('PURCHASE_EFFECT_REQUEST_CHECKSUM_MISMATCH')
     return result
 
 
-def _payable(value, expected):
-    _keys(value, PAYABLE_FIELDS, 'INVALID_PURCHASE_PAYABLE_CONFIRMATION')
+def _payable(value, expected, version=1):
+    _keys(value, PAYABLE_FIELDS | ({'payment_terms', 'exchange_rate'} if version == 2 else set()),
+          'INVALID_PURCHASE_PAYABLE_CONFIRMATION')
     if value['invoice_key'] != expected['invoice_key']:
         _fail('PURCHASE_PAYABLE_INVOICE_IDENTITY_MISMATCH')
     primary = value['primary_key']
@@ -272,6 +545,11 @@ def _payable(value, expected):
     _currency(value['currency'])
     if value['currency'] != expected['currency'] or not _equal_money(value['amount_total'], expected['totals']['total']):
         _fail('PURCHASE_PAYABLE_TOTAL_OR_CURRENCY_MISMATCH')
+    if version == 2:
+        _crc(value['currency'], value['exchange_rate'])
+        _terms(value['payment_terms'], _iso_date(expected['invoice_date']))
+        if value['payment_terms'] != expected['fiscal']['payment_terms']:
+            _fail('PURCHASE_PAYABLE_PAYMENT_TERMS_MISMATCH')
 
 
 def _receive_result(operation, result, invoice_binding):
@@ -279,11 +557,17 @@ def _receive_result(operation, result, invoice_binding):
         'status', 'request_checksum', 'receipt_ids', 'order_id', 'stock_confirmed',
         'valuation_confirmed', 'ap_confirmed', 'order_verified', 'payable', 'lines',
     }
+    if operation['contract'] == 2:
+        required |= {'fiscal_checksum', 'fiscal_confirmed', 'physical_receipt_date'}
     _keys(result, required, 'INVALID_PURCHASE_RECEIPT_CONFIRMATION')
     for flag in ('stock_confirmed', 'valuation_confirmed', 'ap_confirmed', 'order_verified'):
         if result[flag] is not True:
             _fail('PURCHASE_RECEIPT_NATIVE_EFFECT_UNCONFIRMED')
     expected = operation['receipt']
+    if operation['contract'] == 2:
+        if (result['fiscal_confirmed'] is not True or result['fiscal_checksum'] != digest(expected['fiscal'])
+                or result['physical_receipt_date'] != expected['fiscal']['physical_receipt_date']):
+            _fail('PURCHASE_RECEIPT_FISCAL_EFFECT_UNCONFIRMED')
     if type(result['order_id']) is not int or result['order_id'] != expected['order_id']:
         _fail('PURCHASE_RECEIPT_ORDER_IDENTITY_MISMATCH')
     receipt_ids = result['receipt_ids']
@@ -295,9 +579,9 @@ def _receive_result(operation, result, invoice_binding):
         _integer(number)
     if len(set(receipt_ids)) != len(receipt_ids):
         _fail('DUPLICATE_NATIVE_PURCHASE_RECEIPT_IDENTITY')
-    _payable(result['payable'], expected)
+    _payable(result['payable'], expected, operation['contract'])
     if invoice_binding is not None:
-        _payable(invoice_binding, expected)
+        _payable(invoice_binding, expected, operation['contract'])
         # Another receipt for the same invoice must resolve the same AP identity.
         if (invoice_binding['primary_key'] != result['payable']['primary_key']
                 or {tuple(k) for k in invoice_binding['detail_keys']} != {tuple(k) for k in result['payable']['detail_keys']}):
@@ -344,8 +628,9 @@ def _price_result(operation, result):
     if result['price_confirmed'] is not True:
         _fail('NATIVE_PRICE_UNCONFIRMED')
     effective = result['effective_price']; expected = operation['price']
-    _keys(effective, PRICE_FIELDS - {'document_id'}, 'INVALID_NATIVE_EFFECTIVE_PRICE')
-    checked = price({**effective, 'document_id': expected['document_id']})
+    fields = PRICE_FIELDS | ({'exchange_rate'} if operation['contract'] == 2 else set())
+    _keys(effective, fields - {'document_id'}, 'INVALID_NATIVE_EFFECTIVE_PRICE')
+    checked = price({**effective, 'document_id': expected['document_id']}, version=operation['contract'])
     for key in ('article_id', 'level', 'currency', 'vat_code', 'vat_rate'):
         if type(checked[key]) is bool or checked[key] != expected[key]:
             _fail('NATIVE_PRICE_IDENTITY_MISMATCH')
@@ -426,6 +711,11 @@ class NativeEffectsBoundary:
             _fail('PURCHASE_EFFECT_SCOPE_MISMATCH')
         if previous_result is not None:
             return reconcile(operation, previous_result, invoice_binding=invoice_binding)
+        blockers = execution_blockers(operation)
+        if blockers:
+            return {**{key: operation[key] for key in COMMON},
+                    'request_checksum': operation['request_checksum'], 'status': 'blocked',
+                    'code': blockers[0]}
         if (self.native_executor is None or operation['action'] not in self.certified_actions
                 or not self.evidence_reference):
             return {**{key: operation[key] for key in COMMON},

@@ -46,6 +46,39 @@ def price_request():
     })
 
 
+def receive_request_v2():
+    request = receive_request()
+    request['contract'] = 2
+    receipt = request['receipt']
+    receipt['invoice_key'] = '5' * 50
+    receipt['totals'] = {'untaxed': 200, 'tax': 0, 'total': 200}
+    receipt['fiscal'] = {
+        'xml_sha256': 'c' * 64, 'issued_at': '2026-11-18T08:00:00-06:00',
+        'physical_receipt_date': '2026-11-19', 'source_currency': 'CRC',
+        'source_exchange_rate': None, 'exchange_rate': 1,
+        'payment_terms': {'condition_code': '01', 'credit_days': 0,
+            'due_date': '2026-11-18', 'due_date_source': 'cash_issue_date'},
+        'vat_refund': 0, 'other_charges': [],
+        'lines': [{
+            'xml_line_id': 4, 'xml_sequence': 1, 'cabys': '4740399009900',
+            'inventory_effect': 'receive', 'quantity': 2, 'quantity_base': 2,
+            'conversion_factor': 1, 'conversion_mode': 'multiply',
+            'unit_price': 100, 'gross_amount': 200, 'discounts': [], 'net_amount': 200,
+            'taxes': [], 'assumed_tax_amount': 0, 'net_tax_amount': 0,
+            'promotion': {'type': None, 'parent_xml_line_id': None},
+            'allocation_ids': [receipt['lines'][0]['allocation_id']],
+        }],
+    }
+    return rehash(request)
+
+
+def price_request_v2():
+    request = price_request()
+    request['contract'] = 2
+    request['price']['exchange_rate'] = 1
+    return rehash(request)
+
+
 def common(request):
     return {key: copy.deepcopy(request[key]) for key in contract.COMMON | {'request_checksum'}}
 
@@ -73,6 +106,10 @@ def native_receive(request):
             # Intentionally unlike incoming cost: this is a native result.
             'average_cost_base': 73.125,
         })
+    if request['contract'] == 2:
+        result.update(fiscal_confirmed=True, fiscal_checksum=contract.digest(receipt['fiscal']),
+                      physical_receipt_date=receipt['fiscal']['physical_receipt_date'])
+        result['payable'].update(payment_terms=copy.deepcopy(receipt['fiscal']['payment_terms']), exchange_rate=1)
     return result
 
 
@@ -367,7 +404,7 @@ class PurchaseEffectsContractTests(unittest.TestCase):
         for config in ({}, {'native_executor': executor},
                        {'native_executor': executor, 'certified_actions': {'purchase.receive'}}):
             with self.subTest(config=config):
-                result = contract.execute(receive_request(), application_id=APP,
+                result = contract.execute(receive_request_v2(), application_id=APP,
                                           source_instance=SOURCE, **config)
                 self.assertEqual(result['status'], 'blocked')
                 self.assertEqual(result['code'], 'BLOCKED_NATIVE_PURCHASE_NOT_CERTIFIED')
@@ -378,16 +415,16 @@ class PurchaseEffectsContractTests(unittest.TestCase):
         executor = Mock(side_effect=native_receive)
         boundary = contract.NativeEffectsBoundary(APP, SOURCE, native_executor=executor,
             certified_actions={'purchase.receive'}, evidence_reference='laboratory/certified-fixture')
-        self.assertEqual(boundary.apply(receive_request())['status'], 'synchronized')
-        self.assertEqual(boundary.apply(price_request())['status'], 'blocked')
-        wrong = receive_request()
+        self.assertEqual(boundary.apply(receive_request_v2())['status'], 'synchronized')
+        self.assertEqual(boundary.apply(price_request_v2())['status'], 'blocked')
+        wrong = receive_request_v2()
         wrong['source_instance'] = 'untrusted'
         with self.assertRaises(contract.PurchaseEffectsError):
             boundary.apply(wrong)
         self.assertEqual(executor.call_count, 1)
 
     def test_durable_replay_does_not_invoke_executor_and_unknown_commit_is_not_rejected(self):
-        request = receive_request()
+        request = receive_request_v2()
         original = native_receive(request)
         executor = Mock(side_effect=contract.NativeResultUnknown('native result requires reconciliation'))
         boundary = contract.NativeEffectsBoundary(APP, SOURCE, native_executor=executor,
@@ -404,6 +441,179 @@ class PurchaseEffectsContractTests(unittest.TestCase):
         self.assertEqual(contract.reconcile(request, result), result)
         result['stock_confirmed'] = True
         self.assert_unverified(request, result)
+
+    def test_v1_is_historical_only_even_with_a_certified_callback(self):
+        executor = Mock(side_effect=native_receive)
+        boundary = contract.NativeEffectsBoundary(APP, SOURCE, native_executor=executor,
+            certified_actions=contract.ACTIONS, evidence_reference='laboratory/certified-fixture')
+        request = receive_request()
+        self.assertEqual(boundary.apply(request)['code'], 'BLOCKED_PURCHASE_FISCAL_V2_REQUIRED')
+        self.assertEqual(boundary.apply(price_request())['code'], 'BLOCKED_PURCHASE_FISCAL_V2_REQUIRED')
+        historical = native_receive(request)
+        self.assertEqual(boundary.apply(request, previous_result=historical), historical)
+        executor.assert_not_called()
+
+    def test_v2_ordinary_crc_source_and_separate_physical_date_are_preserved(self):
+        request = receive_request_v2()
+        self.assertEqual(contract.request(request), request)
+        self.assertEqual(contract.execution_blockers(request), [])
+        self.assertIsNone(contract.request(request)['receipt']['fiscal']['source_exchange_rate'])
+        result = native_receive(request)
+        self.assertEqual(contract.reconcile(request, result), result)
+        request['receipt']['fiscal']['source_exchange_rate'] = 1.0
+        self.assertEqual(contract.request(rehash(request)), request)
+
+    def test_v2_requires_crc_identity_rate_without_reinterpreting_foreign_values(self):
+        for field, value in [('source_currency', 'USD'), ('source_exchange_rate', 530),
+                             ('exchange_rate', 530), ('exchange_rate', True)]:
+            with self.subTest(field=field):
+                request = receive_request_v2()
+                request['receipt']['fiscal'][field] = value
+                self.assert_bad_request(rehash(request))
+        request = receive_request_v2()
+        request['receipt']['currency'] = 'USD'
+        self.assert_bad_request(rehash(request))
+        request = price_request_v2()
+        self.assertEqual(contract.reconcile(request, native_price(request))['status'], 'synchronized')
+        request['price']['currency'] = 'USD'
+        self.assert_bad_request(rehash(request))
+
+    def test_v2_fiscal_identity_timestamp_and_complete_stock_coverage_are_required(self):
+        for field, value in [('xml_sha256', 'not-a-digest'), ('issued_at', '2026-11-18T08:00:00'),
+                             ('issued_at', '2026-11-17T08:00:00-06:00'), ('physical_receipt_date', None)]:
+            with self.subTest(field=field):
+                request = receive_request_v2()
+                request['receipt']['fiscal'][field] = value
+                self.assert_bad_request(rehash(request))
+        for field, value in [('allocation_ids', []), ('allocation_ids', ['missing']),
+                             ('quantity_base', 3), ('conversion_factor', 2),
+                             ('xml_line_id', 5), ('cabys', '')]:
+            with self.subTest(field=field):
+                request = receive_request_v2()
+                request['receipt']['fiscal']['lines'][0][field] = value
+                self.assert_bad_request(rehash(request))
+
+    def test_v2_tax_is_declared_not_inferred_from_rate(self):
+        request = receive_request_v2()
+        source = request['receipt']['fiscal']['lines'][0]
+        # A deliberately non-rate-derived amount must be transported faithfully.
+        source['taxes'] = [{'code': '01', 'rate_code': '08', 'rate': 13, 'base_amount': 200,
+            'amount': 25.1234, 'net_amount': 25.1234, 'exoneration_percentage': 0,
+            'exoneration_amount': 0, 'included_in_cost': False, 'exoneration_xml': None}]
+        source['net_tax_amount'] = 25.1234
+        request['receipt']['totals'].update(tax=25.1234, total=225.1234)
+        rehash(request)
+        self.assertEqual(contract.request(request), request)
+        self.assertIn('BLOCKED_PURCHASE_TAX_NOT_CERTIFIED', contract.execution_blockers(request))
+        self.assertEqual(contract.reconcile(request, native_receive(request))['status'], 'synchronized')
+        source['taxes'][0]['amount'] = 26
+        self.assert_bad_request(rehash(request))
+
+    def test_v2_exoneration_legal_fragment_and_assumed_tax_are_not_lost_or_reallocated(self):
+        request = receive_request_v2()
+        source = request['receipt']['fiscal']['lines'][0]
+        fragment = '<Exoneracion><NumeroDocumento>EX-001</NumeroDocumento><Articulo>9</Articulo></Exoneracion>'
+        source['taxes'] = [{'code': '01', 'rate_code': '08', 'rate': 13, 'base_amount': 200,
+            'amount': 26, 'net_amount': 16, 'exoneration_percentage': None,
+            'exoneration_amount': 10, 'included_in_cost': False, 'exoneration_xml': fragment}]
+        source['assumed_tax_amount'] = 6
+        source['net_tax_amount'] = 10
+        request['receipt']['totals'].update(tax=10, total=210)
+        rehash(request)
+        checked = contract.request(request)
+        self.assertEqual(checked['receipt']['fiscal']['lines'][0]['taxes'][0]['exoneration_xml'], fragment)
+        self.assertIsNone(checked['receipt']['fiscal']['lines'][0]['taxes'][0]['exoneration_percentage'])
+        self.assertNotIn('assumed_tax_amount', source['taxes'][0])
+        source['taxes'][0]['exoneration_xml'] = None
+        self.assert_bad_request(rehash(request))
+
+    def test_v2_services_and_other_charges_keep_financial_amount_without_stock(self):
+        request = receive_request_v2()
+        fiscal = request['receipt']['fiscal']
+        service = copy.deepcopy(fiscal['lines'][0])
+        service.update(xml_line_id=5, xml_sequence=2, inventory_effect='none', quantity=1,
+            quantity_base=None, conversion_factor=None, conversion_mode=None,
+            unit_price=10, gross_amount=10, net_amount=10, allocation_ids=[])
+        fiscal['lines'].append(service)
+        fiscal['other_charges'] = [{'xml_index': 1, 'type': '06', 'detail': 'Servicio tercero',
+            'percentage': None, 'amount': 5,
+            'source_xml': '<OtrosCargos><TipoDocumentoOC>06</TipoDocumentoOC><NombreTercero>Proveedor tercero</NombreTercero><MontoCargo>5</MontoCargo></OtrosCargos>'}]
+        request['receipt']['totals'] = {'untaxed': 210, 'tax': 0, 'total': 215}
+        rehash(request)
+        self.assertEqual(contract.request(request), request)
+        self.assertEqual(len(request['receipt']['lines']), 1)
+        self.assertIn('BLOCKED_PURCHASE_NON_STOCK_FISCAL_NOT_CERTIFIED', contract.execution_blockers(request))
+        self.assertIn('BLOCKED_PURCHASE_CHARGES_REFUND_NOT_CERTIFIED', contract.execution_blockers(request))
+        service['quantity_base'] = 0
+        self.assert_bad_request(rehash(request))
+
+    def test_v2_discount_and_zero_cost_promotion_preserve_original_fiscal_lines(self):
+        request = receive_request_v2()
+        fiscal = request['receipt']['fiscal']; source = fiscal['lines'][0]
+        source['unit_price'] = 125; source['gross_amount'] = 250
+        source['discounts'] = [{'code': '07', 'amount': 50, 'nature': 'Descuento comercial',
+            'source_xml': '<Descuento><MontoDescuento>50</MontoDescuento><CodigoDescuento>07</CodigoDescuento></Descuento>'}]
+        gift = copy.deepcopy(source)
+        gift.update(xml_line_id=5, xml_sequence=2, quantity=1, quantity_base=1,
+                    unit_price=0, gross_amount=0, discounts=[], net_amount=0,
+                    promotion={'type': 'regalia', 'parent_xml_line_id': 4}, allocation_ids=['gift'])
+        fiscal['lines'].append(gift)
+        allocation = copy.deepcopy(request['receipt']['lines'][0])
+        allocation.update(allocation_id='gift', xml_line_id=5, quantity=1, quantity_base=1,
+                          unit_cost=0, unit_cost_base=0)
+        request['receipt']['lines'].append(allocation)
+        rehash(request)
+        self.assertEqual(contract.request(request), request)
+        blockers = contract.execution_blockers(request)
+        self.assertIn('BLOCKED_PURCHASE_PROMOTION_NOT_CERTIFIED', blockers)
+        self.assertIn('BLOCKED_PURCHASE_DISCOUNT_NOT_CERTIFIED', blockers)
+        self.assertIn('BLOCKED_PURCHASE_NATIVE_SPLIT_NOT_CERTIFIED', blockers)
+        gift['promotion']['parent_xml_line_id'] = 999
+        self.assert_bad_request(rehash(request))
+
+    def test_v2_credit_is_a_labelled_proposal_not_a_native_due_date_rule(self):
+        request = receive_request_v2()
+        terms = request['receipt']['fiscal']['payment_terms']
+        terms.update(condition_code='02', credit_days=30, due_date='2026-12-18', due_date_source='odoo_credit_days')
+        rehash(request)
+        self.assertEqual(contract.request(request), request)
+        self.assertIn('BLOCKED_PURCHASE_CREDIT_NOT_CERTIFIED', contract.execution_blockers(request))
+        terms['due_date_source'] = 'cash_issue_date'
+        self.assert_bad_request(rehash(request))
+
+    def test_v2_special_cases_never_reach_a_generic_certified_callback(self):
+        request = receive_request_v2()
+        request['receipt']['fiscal']['payment_terms'].update(condition_code='02', credit_days=30,
+            due_date='2026-12-18', due_date_source='odoo_credit_days')
+        rehash(request)
+        executor = Mock(side_effect=AssertionError('special fiscal case is not certified'))
+        boundary = contract.NativeEffectsBoundary(APP, SOURCE, native_executor=executor,
+            certified_actions=contract.ACTIONS, evidence_reference='laboratory/general-only')
+        self.assertEqual(boundary.apply(request)['code'], 'BLOCKED_PURCHASE_CREDIT_NOT_CERTIFIED')
+        executor.assert_not_called()
+
+    def test_v2_fiscal_ack_requires_original_digest_physical_date_and_payable_terms(self):
+        request = receive_request_v2()
+        for field, value in [('fiscal_confirmed', 1), ('fiscal_checksum', 'd' * 64),
+                             ('physical_receipt_date', '2026-11-18')]:
+            with self.subTest(field=field):
+                ack = native_receive(request); ack[field] = value
+                self.assert_unverified(request, ack)
+        ack = native_receive(request)
+        ack['payable']['payment_terms']['due_date_source'] = 'xml'
+        self.assert_unverified(request, ack)
+        ack = native_receive(request)
+        ack['payable']['exchange_rate'] = 530
+        self.assert_unverified(request, ack)
+
+    def test_v2_audit_fragments_cannot_expand_entities_or_hide_another_root(self):
+        for fragment in ('<!DOCTYPE x [<!ENTITY y "value">]><Descuento>&y;</Descuento>',
+                         '<OtrosCargos/>', '<Descuento>', '<Descuento>' + 'x' * 65536 + '</Descuento>'):
+            with self.subTest(fragment=fragment[:50]):
+                request = receive_request_v2()
+                source = request['receipt']['fiscal']['lines'][0]
+                source['discounts'] = [{'code': None, 'amount': 0, 'nature': '', 'source_xml': fragment}]
+                self.assert_bad_request(rehash(request))
 
 
 if __name__ == '__main__':

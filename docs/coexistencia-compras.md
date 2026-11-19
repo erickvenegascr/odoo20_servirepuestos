@@ -4,6 +4,12 @@ SGA sigue siendo la fuente de costo, precio efectivo e inventario. La recepción
 se identifica por factura, no por el total de la OC. Los pedidos sirven para
 conservar autorización, cantidades solicitadas y saldos parciales.
 
+La decisión del usuario es operar todo este circuito en **CRC**. Odoo consulta
+SGA y envía las altas, ingresos y propuestas de precio al gateway; el efecto
+se confirma con el resultado nativo antes de completar el espejo Odoo. La
+decisión de moneda no activa el escritor pendiente ni cambia por sí sola la
+moneda contable o los asientos de una compañía.
+
 ```mermaid
 flowchart LR
     F[Factura XML FiscalBot] --> O{OC en Odoo}
@@ -26,7 +32,7 @@ flowchart LR
 | --- | --- | --- |
 | `purchase_source.py` | Pedidos y líneas, cantidades mayor/detalle, banderas, moneda explícita, checksum y cursor | Implementado, SELECT solamente |
 | `purchase_replenishment.py` | Listado bajo mínimo, clasificación ABC almacenada, ranking y proveedor por prioridad inequívoca | Implementado como lectura revisable |
-| `purchase_effects_contract.py` | Valida identidad, cantidades, costos, obligación CxP y resultados | Implementado; no ejecuta efectos |
+| `purchase_effects_contract.py` | Contrato 2 de ingresos/precios: identidad, asignaciones, fuente fiscal, CRC, CxP y resultados nativos | Implementado; no ejecuta efectos |
 | `purchase_exchange.py` | Canal inverso autenticado existente, fuente/aplicación fijas, límites de respuesta | Optativo; apagado por defecto |
 | Addon Odoo `sga_gateway_purchase_flow` | Buscar/importar, recepciones por XML, notificaciones y reparación del espejo | Pruebas ORM; apagado por defecto |
 | Escritor nativo de pedidos/ingresos/precios/reversas | Aplicación completa con reglas y transacción SGA | Pendiente de certificación e implementación |
@@ -82,8 +88,20 @@ a una configuración local privada (ejemplo en `deploy/purchase-bridge.example.j
 Comparte la fuente SELECT ya restringida; la cuenta de artículos y Java siguen
 independientes. La opción `enabled` no concede derechos de escritura.
 
+El ejemplo conserva `enabled=false` y fija `national_currency_code="¢"` por la
+decisión explícita de trabajar en CRC. Es el código nativo de moneda nacional,
+homologado a `CRC` mediante `currency_map`. El mapa conserva `$`→`USD` para
+identificar datos de lectura históricos: no habilita ingresos ni precios en USD,
+ni convierte importes por cambiar su etiqueta. Las selecciones de reposición
+siguen sin predeterminarse y la verificación de la consulta sigue en falso.
+
 Todas las solicitudes fijan `contract`, `action`, `operation_id`, `application_id`
-y `source_instance`. El UUID es el del mensaje inmutable. Los resultados exitosos
+y `source_instance`. Las lecturas `purchase.search`/`purchase.replenish` y el
+registro de OC `purchase.upsert` conservan `contract=1`; `purchase.receive` y
+`price.publish` utilizan `contract=2`. El UUID es el del mensaje inmutable.
+Los ingresos y precios incluyen `request_checksum` del bloque correspondiente;
+una confirmación histórica de versión 1 no confirma una solicitud de versión 2.
+Los resultados exitosos
 se conservan en GatewayInbox: una respuesta perdida no repite un efecto. Un bloqueo
 de capacidad se comunica sin convertirlo en recibo nativo terminal. Una excepción
 de commit desconocido conserva la solicitud pendiente para reconciliar la misma
@@ -94,20 +112,44 @@ sin resolver, fallo de red y conflicto de datos. Las respuestas se acotan al lí
 del endpoint Odoo; se recortan solo entre órdenes completas y conservan cursor.
 Un pedido individual demasiado grande exige otro contrato; no se trunca su detalle.
 
-## Aplicación nativa pendiente
+## Contrato fiscal 2 y aplicación nativa pendiente
 
-El actual contrato de efectos puede validar mercancía ordinaria neta y su resultado,
-pero no transporta toda la semántica fiscal/CxP. Antes de conectar un ejecutor se
-requiere versión fiscal completa: impuestos/exoneraciones/costos capitalizados por
-línea, bonificaciones, cargos, fecha física de recepción, moneda/tipo de cambio,
-condición y plazo de crédito, vencimiento y XML íntegro con hash verificable.
+`purchase.receive` conserva la clave fiscal, SHA256 del XML original, emisión con
+zona horaria, fecha física de recepción y condiciones de pago con origen del
+vencimiento. Exige `currency=CRC`, `source_currency=CRC` y tipo de cambio efectivo
+1. `source_exchange_rate=null` conserva la ausencia de ese dato en el XML; si se
+declara, debe ser 1. Las asignaciones enlazan línea XML, artículo, presentación,
+factor, cantidad y costo neto con la línea nativa de OC. El costo distribuido
+se concilia con el subtotal XML mediante la precisión nativa de cuatro decimales;
+no se reemplaza por la cotización de la OC ni por un promedio calculado localmente.
+
+El bloque fiscal transporta CABYS, descuentos, impuestos, exoneraciones, impuesto
+asumido, IVA devuelto, promociones, cargos y servicios sin inventario. Conserva
+fragmentos XML de descuentos, exoneraciones y otros cargos para mantener su
+fuente. Validar y transportar esos datos no demuestra que SGA los aplique: el
+límite de ejecución bloquea impuestos, descuentos, promociones, cargos/IVA
+devuelto, crédito, líneas sin stock y particiones con condiciones nativas
+incompatibles hasta certificar cada caso. La candidata ordinaria restante es
+mercancía neta de contado en CRC; también requiere un ejecutor nativo certificado.
+Las solicitudes de efectos versión 1 quedan bloqueadas para nueva ejecución.
+
+`price.publish` versión 2 exige CRC y `exchange_rate=1`, conserva nivel, precio
+sin impuesto y código/tarifa de IVA. Solo una confirmación del precio efectivo
+nativo permite actualizar su espejo Odoo; enviar la propuesta no anuncia éxito.
 
 La transacción nativa deberá deduplicar por operación y factura, asignar consecutivos
 con el mecanismo SGA, guardar recibo/CxP, modificar existencias y valoración,
 actualizar agregados/saldos de OC y verificar el commit. La confirmación tendrá
 identidades nativas, cantidades y costos efectivos por asignación y obligación CxP
-única. Unas banderas `true` en JSON no prueban estos efectos.
+única. La confirmación 2 incluye también digest fiscal, fecha física y condiciones
+CxP coincidentes. Unas banderas `true` en JSON no prueban estos efectos. El espejo
+Odoo inicial admite un recibo por factura/operación, mercancía AVCO sin trazabilidad,
+cantidades enteras y factor 1; ampliar presentaciones o particiones exige otro
+alcance certificado.
 
-La primera activación espera además una decisión de moneda contable: la compañía
-actual Odoo está en USD y el negocio SGA opera importes en CRC. No se cambia esa
-configuración ni se copian importes entre monedas sin homologación explícita.
+La conexión Odoo debe homologar CRC tanto para SGA como para la moneda contable.
+Si una compañía aún conserva otra moneda, el ingreso se bloquea; no se copian
+CRC como si fueran USD ni se modifica la contabilidad desde este ejemplo. La
+lectura de OC es independiente de habilitar los efectos financieros. No se ha
+añadido un escritor SQL/Jet ni el barrido continuo de órdenes, y `enabled=false`
+sigue siendo el estado de despliegue de referencia.
