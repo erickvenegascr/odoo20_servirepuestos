@@ -14,6 +14,7 @@ class TestArticleCodeMask(TransactionCase):
     def test_identity_is_six_digits_and_commercial_reference_is_separate(self):
         product=self.product(default_code='COMMERCIAL')
         self.assertEqual('000123',product.default_code)
+        self.assertIn('000123',product.sga_creation_message)
         self.assertEqual('COMMERCIAL',product.sga_commercial_reference)
         self.assertEqual('1000000',article_code(1000000))
         with self.assertRaises(ValidationError):product.with_context(sga_card_internal=False).default_code='999999'
