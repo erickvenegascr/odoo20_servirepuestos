@@ -15,6 +15,7 @@ import uuid
 import pymysql
 from bridge.article_contract import ArticleError, next_article
 from bridge.article_sql import ArticleSql, ArticleCommitUnknown, WRITE_COLUMNS, INTEGRATION_PRIVILEGES
+from bridge.article_initialization import INITIAL_COLUMNS
 
 SOCKET = os.environ.get('SGA_ARTICLE_LAB_SOCKET')
 APP = '212621ca-e0e0-41c9-b5f0-d6da7b496226'
@@ -44,12 +45,19 @@ class ArticleSqlLab(unittest.TestCase):
             # Minimal synthetic parent tables absent from the metadata export.
             c.execute('CREATE TABLE comisiones(Comision VARCHAR(3) PRIMARY KEY) ENGINE=InnoDB CHARSET=utf8')
             c.execute('CREATE TABLE componentes(Componente SMALLINT PRIMARY KEY) ENGINE=InnoDB CHARSET=utf8')
+            c.execute('CREATE TABLE proveedores(Proveedor VARCHAR(3) PRIMARY KEY,Activo BIT NOT NULL DEFAULT 1) ENGINE=InnoDB CHARSET=utf8')
+            c.execute('CREATE TABLE preciosniveles(Nivel SMALLINT PRIMARY KEY,EnDolares BIT NOT NULL DEFAULT 0) ENGINE=InnoDB CHARSET=utf8')
             c.execute('SET FOREIGN_KEY_CHECKS=1')
             c.execute("INSERT INTO divisiones(Division,DivisionNomb) VALUES('LAB','Laboratorio')")
             c.execute("INSERT INTO categorias(Categoria,CategoriaNomb) VALUES(1,'Categoria'),(2,'Otra')")
             c.execute("INSERT INTO categoriassub(Categoria,SubCategoria,SubCategoriaNomb) VALUES(1,1,'Sub')")
             c.execute("INSERT INTO marcas(Marca,MarcaNomb) VALUES('LAB','Marca')")
             c.execute("INSERT INTO bodegas(Bodega,BodegaNomb) VALUES(1,'Laboratorio')")
+            c.execute("INSERT INTO proveedores(Proveedor) VALUES('LAB')")
+            c.execute('INSERT INTO preciosniveles(Nivel) VALUES(1)')
+            c.execute("INSERT INTO artsservs(Articulo,ArticuloNomb) VALUES(900000,'SYNTHETIC PROFILE')")
+            c.execute("INSERT INTO artsservsrefer(Articulo,CodActividad,BodegaDevolucion) VALUES(900000,'123456',1)")
+            c.execute('INSERT INTO artsservsprecios(Articulo,Nivel,PorcDescto,PorcDesctoDet) VALUES(900000,1,.1,.1)')
             c.execute('CREATE DATABASE article_integration CHARACTER SET utf8')
             c.execute('USE article_integration')
             ddl=Path(__file__).parents[1].joinpath('article_schema.sql').read_text()
@@ -66,6 +74,21 @@ class ArticleSqlLab(unittest.TestCase):
                     c.execute('GRANT '+expression+' ON article_fixture.'+table+' TO `'+cls.writer_user+'`@`localhost`')
             for table,permissions in INTEGRATION_PRIVILEGES.items():
                 c.execute('GRANT '+','.join(sorted(permissions))+' ON article_integration.'+table+' TO `'+cls.writer_user+'`@`localhost`')
+            cls.complete_user='i_'+uuid.uuid4().hex[:8]
+            c.execute('CREATE USER `%s`@`localhost`' % cls.complete_user)
+            c.execute('GRANT SELECT ON article_fixture.* TO `%s`@`localhost`' % cls.complete_user)
+            for table,permissions in WRITE_COLUMNS.items():
+                for privilege,columns in permissions.items():
+                    expression=privilege+' ('+','.join('`'+n+'`' for n in sorted(columns))+')' if columns else privilege
+                    c.execute('GRANT '+expression+' ON article_fixture.'+table+' TO `'+cls.complete_user+'`@`localhost`')
+            for table,columns in INITIAL_COLUMNS.items():
+                c.execute('GRANT INSERT ('+','.join('`'+n+'`' for n in sorted(columns))+') ON article_fixture.'+table+' TO `'+cls.complete_user+'`@`localhost`')
+                update=columns-{'Articulo','Proveedor','Bodega','Nivel','Prioridad'}
+                if table=='articulosbodegas':continue
+                if table=='artsservsprecios':update={'PorcDescto','PorcDesctoDet','Usuario','Estacion','FechaActualizacion'}
+                c.execute('GRANT UPDATE ('+','.join('`'+n+'`' for n in sorted(update))+') ON article_fixture.'+table+' TO `'+cls.complete_user+'`@`localhost`')
+            for table,permissions in INTEGRATION_PRIVILEGES.items():
+                c.execute('GRANT '+','.join(sorted(permissions))+' ON article_integration.'+table+' TO `'+cls.complete_user+'`@`localhost`')
         cls.config={'enabled':True,'application_id':APP,'source_instance':'laboratory',
                     'database':'article_fixture','integration_schema':'article_integration',
                     'audit_mode':'transaction_receipt','audit_user':'LAB','audit_station':1,
@@ -244,3 +267,77 @@ class ArticleSqlLab(unittest.TestCase):
     def test_initial_activation_can_be_limited_to_one_product_uuid(self):
         op=self.request();restricted=ArticleSql({**self.config,'allowed_product_uuids':[str(uuid.uuid4())]},APP)
         with self.assertRaisesRegex(ArticleError,'ARTICLE_PRODUCT_NOT_AUTHORIZED'):restricted.apply(op)
+
+    def full_writer(self):
+        return ArticleSql({**self.config,'user':self.complete_user,'initialization':{
+            'reference_article':900000,'activity':'123456','warehouse':1,'discount':10,'price_level':1,'currency':'CRC'}},APP)
+
+    def full_request(self, **changes):
+        op=self.request(contract=3,**changes)
+        op['initialization']={'cabys':'1234567890123','unit_cost':100.1234,'currency':'CRC','vat_code':'08',
+            'vat_rate':13,'vendor_code':'LAB','vendor_product_code':'LAB-CODE','markup':.3}
+        return op
+
+    def test_full_create_commits_all_required_rows_without_inventory(self):
+        writer=self.full_writer();op=self.full_request();result=writer.apply(op);article=result['article_id']
+        self.assertTrue(result['initialization_confirmed']);self.assertEqual(result,writer.apply(op))
+        for column,value in [('CodHacienda','1234567890123'),('UltProveedor','LAB'),('CostoUnit',100.1234),('TipoIVA','08'),('CantDisponible',0)]:
+            self.assertEqual(value,self.scalar('SELECT '+column+' FROM article_fixture.artsservs WHERE Articulo=%s',(article,)))
+        self.assertEqual('123456',self.scalar('SELECT CodActividad FROM article_fixture.artsservsrefer WHERE Articulo=%s',(article,)))
+        self.assertEqual(1,self.scalar('SELECT BodegaDevolucion FROM article_fixture.artsservsrefer WHERE Articulo=%s',(article,)))
+        self.assertEqual('LAB-CODE',self.scalar('SELECT CodigoArticulo FROM article_fixture.articulosproveedor WHERE Articulo=%s',(article,)))
+        self.assertEqual(0,self.scalar('SELECT Cant FROM article_fixture.articulosbodegas WHERE Articulo=%s',(article,)))
+        self.assertEqual(.1,self.scalar('SELECT PorcDesctoDet FROM article_fixture.artsservsprecios WHERE Articulo=%s',(article,)))
+
+    def test_full_create_late_failure_rolls_back_master_and_receipt(self):
+        writer=self.full_writer();op=self.full_request();op['initialization']['vendor_code']='BAD'
+        with self.assertRaisesRegex(ArticleError,'ARTICLE_INITIALIZATION_VENDOR_MISSING'):writer.apply(op)
+        self.assertEqual(0,self.scalar('SELECT COUNT(*) FROM article_fixture.artsservs WHERE NombreCorto=%s',(op['values']['reference'],)))
+        self.assertEqual(0,self.scalar('SELECT COUNT(*) FROM article_integration.article_receipt WHERE operation_uuid=%s',(op['operation_id'],)))
+
+    def test_full_completion_preserves_native_price_and_identity(self):
+        created=self.writer.apply(self.request(contract=2));article=created['article_id']
+        with self.db.cursor() as c:
+            c.execute('INSERT INTO article_fixture.artsservsprecios(Articulo,Nivel,PorcGanancia,PrecioSugerido) VALUES(%s,1,.47,1234)',(article,))
+        op=self.full_request(action='article.initialize',article_id=article,product_uuid=created['product_uuid'],expected=created['values'])
+        op['values']=created['values'];result=self.full_writer().apply(op)
+        self.assertEqual(article,result['article_id']);self.assertTrue(result['existing_price_preserved'])
+        self.assertAlmostEqual(.47,self.scalar('SELECT PorcGanancia FROM article_fixture.artsservsprecios WHERE Articulo=%s',(article,)),places=6)
+        self.assertEqual(1234,self.scalar('SELECT PrecioSugerido FROM article_fixture.artsservsprecios WHERE Articulo=%s',(article,)))
+
+    def test_full_completion_refuses_used_article_and_imported_identity(self):
+        created=self.writer.apply(self.request());article=created['article_id']
+        op=self.full_request(action='article.initialize',article_id=article,product_uuid=created['product_uuid'],expected=created['values'])
+        op['values']=created['values']
+        with self.db.cursor() as c:c.execute('UPDATE article_fixture.artsservs SET CantDisponible=1 WHERE Articulo=%s',(article,))
+        with self.assertRaisesRegex(ArticleError,'ARTICLE_INITIALIZATION_REQUIRES_UNUSED_ARTICLE'):self.full_writer().apply(op)
+        with self.db.cursor() as c:
+            c.execute('UPDATE article_fixture.artsservs SET CantDisponible=0 WHERE Articulo=%s',(article,))
+            c.execute('UPDATE article_integration.article_binding SET origin_operation_uuid=NULL WHERE article_id=%s',(article,))
+        with self.assertRaisesRegex(ArticleError,'ARTICLE_INITIALIZATION_REQUIRES_GATEWAY_CREATED_ARTICLE'):self.full_writer().apply(op)
+
+    def test_full_price_conflict_rolls_back_earlier_cost_and_vendor_writes(self):
+        created=self.writer.apply(self.request());article=created['article_id']
+        with self.db.cursor() as c:
+            c.execute('INSERT INTO article_fixture.artsservsprecios(Articulo,Nivel,PorcDescto) VALUES(%s,1,.2)',(article,))
+        op=self.full_request(action='article.initialize',article_id=article,product_uuid=created['product_uuid'],expected=created['values'])
+        op['values']=created['values']
+        with self.assertRaisesRegex(ArticleError,'ARTICLE_INITIALIZATION_LOCAL_CONFLICT'):self.full_writer().apply(op)
+        self.assertEqual(0,self.scalar('SELECT CostoUnit FROM article_fixture.artsservs WHERE Articulo=%s',(article,)))
+        self.assertEqual(0,self.scalar('SELECT COUNT(*) FROM article_fixture.articulosproveedor WHERE Articulo=%s',(article,)))
+        self.assertEqual(0,self.scalar('SELECT COUNT(*) FROM article_integration.article_receipt WHERE operation_uuid=%s',(op['operation_id'],)))
+
+    def test_full_profile_replays_old_receipt_but_rejects_new_partial_create(self):
+        old=self.request(contract=2);receipt=self.writer.apply(old);writer=self.full_writer()
+        self.assertEqual(receipt,writer.apply(old))
+        with self.assertRaisesRegex(ArticleError,'ARTICLE_COMPLETE_CREATION_REQUIRED'):writer.apply(self.request(contract=2))
+
+    def test_full_writer_cannot_update_stock_or_be_used_without_profile(self):
+        connection=pymysql.connect(unix_socket=SOCKET,user=self.complete_user,password='',database='article_fixture')
+        try:
+            with connection.cursor() as c:
+                for table,column in [('artsservs','CantDisponible'),('articulosbodegas','Cant')]:
+                    with self.assertRaises(pymysql.err.OperationalError):c.execute('UPDATE '+table+' SET '+column+'=1')
+        finally:connection.close()
+        with self.assertRaisesRegex(ArticleError,'ARTICLE_WRITER_ACCOUNT_TOO_BROAD'):
+            ArticleSql({**self.config,'user':self.complete_user},APP).apply(self.request())

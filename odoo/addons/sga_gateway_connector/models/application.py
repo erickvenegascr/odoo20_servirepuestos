@@ -110,7 +110,7 @@ class GatewayMessage(models.Model):
 
     @api.model_create_multi
     def create(self, values_list):
-        if not self.env.user.has_group('base.group_system'):
+        if not self.env.su and not self.env.user.has_group('base.group_system'):
             raise AccessError('Solo un administrador puede crear solicitudes gateway.')
         for vals in values_list:
             if vals.get('state', 'pending') != 'pending':

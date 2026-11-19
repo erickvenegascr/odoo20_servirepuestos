@@ -157,7 +157,8 @@ class CatalogSource:
                    path_key('subcategory', row['Division'], row['Categoria'], row['SubCategoria']))
             result.append({
                 'article_id': int(row['Articulo']), 'name': text(row['ArticuloNomb']) or str(row['Articulo']),
-                'default_code': text(row['NombreCorto']) or str(row['Articulo']),
+                'default_code': str(int(row['Articulo'])).zfill(6),
+                'commercial_reference':text(row['NombreCorto']) or None,
                 'service': bit(row['Servicio']), 'active': worked in (1, 255),
                 'source_inactive': worked == 1,
                 'category_key': key, 'units_per_pack': int(row['NumeroUnidades'] or 1),

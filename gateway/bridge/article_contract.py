@@ -2,8 +2,11 @@
 import hashlib
 import json
 import uuid
+import math
+import re
+from decimal import Decimal, ROUND_HALF_UP
 
-VERSION = 2
+VERSION = 3
 MAX_ARTICLE = 2147483647
 FIELDS = frozenset({'name', 'reference', 'service', 'classification', 'barcodes'})
 CLASS_FIELDS = frozenset({'division', 'category', 'subcategory', 'brand'})
@@ -73,16 +76,20 @@ def values(value, *, legacy=False):
 def request(value):
     required = {'contract', 'action', 'operation_id', 'product_uuid', 'source_instance',
                 'article_id', 'values', 'expected'}
+    if isinstance(value,dict) and value.get('contract')==3:required|={'initialization'}
     if (not isinstance(value, dict) or set(value) != required or type(value['contract']) is not int
-            or value['contract'] not in (1, VERSION) or value['action'] not in ('article.create', 'article.update')):
+            or value['contract'] not in (1,2,VERSION) or value['action'] not in ('article.create', 'article.update','article.initialize')
+            or value['action']=='article.initialize' and value['contract']!=3
+            or value['contract']==3 and value['action']=='article.update'):
         raise ArticleError('INVALID_ARTICLE_REQUEST')
     result = dict(value)
     result['operation_id'] = identity(value['operation_id'])
     result['product_uuid'] = identity(value['product_uuid'])
     result['source_instance'] = text(value['source_instance'], 80, required=True)
+    if value['contract']==3:result['initialization']=initialization(value['initialization'])
     if value['action'] == 'article.create':
-        result['values'] = values(value['values'], legacy=value['contract'] == 2)
-        if value['contract']==2 and (result['values']['classification']['division'] is None
+        result['values'] = values(value['values'], legacy=value['contract'] >= 2)
+        if value['contract']>=2 and (result['values']['classification']['division'] is None
                                      or result['values']['classification']['category'] is None):
             raise ArticleError('SGA_ARTICLE_REFERENCES_REQUIRED')
         if value['article_id'] is not None or value['expected'] is not None:
@@ -96,6 +103,24 @@ def request(value):
             raise ArticleError('ARTICLE_REFERENCE_CANNOT_BE_CLEARED')
         if result['values']['service'] != result['expected']['service']:
             raise ArticleError('SGA_ARTICLE_TYPE_CHANGE_REQUIRES_SEPARATE_OPERATION')
+    return result
+
+
+def initialization(value):
+    keys={'cabys','unit_cost','currency','vat_code','vat_rate','vendor_code','vendor_product_code','markup'}
+    if not isinstance(value,dict) or set(value)!=keys:
+        raise ArticleError('INVALID_ARTICLE_INITIALIZATION')
+    result={k:text(value[k],n,required=True) for k,n in [('cabys',13),('currency',3),('vat_code',2),('vendor_code',3),('vendor_product_code',20)]}
+    if not re.fullmatch(r'[0-9]{13}',result['cabys']) or not re.fullmatch(r'[A-Z]{3}',result['currency']) or not re.fullmatch(r'[0-9A-Za-z]{1,3}',result['vendor_code']):
+        raise ArticleError('INVALID_ARTICLE_INITIALIZATION')
+    for key,lo,hi,digits in [('unit_cost',0.0001,999999999999.9999,4),('vat_rate',0,100,4),('markup',0,1000,8)]:
+        item=value[key]
+        if type(item) not in (int,float) or not math.isfinite(item) or not lo<=item<=hi:
+            raise ArticleError('INVALID_ARTICLE_INITIALIZATION')
+        result[key]=float(Decimal(str(item)).quantize(Decimal(1).scaleb(-digits),rounding=ROUND_HALF_UP))
+    rates={'01':0,'02':1,'03':2,'04':4,'08':13,'09':.5,'10':0,'11':0}
+    if result['vat_code'] not in rates or result['vat_rate']!=rates[result['vat_code']]:
+        raise ArticleError('INVALID_ARTICLE_INITIALIZATION_VAT')
     return result
 
 

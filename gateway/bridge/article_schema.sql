@@ -7,7 +7,7 @@ CREATE TABLE configuration (
  source_database VARCHAR(64) NOT NULL
 ) ENGINE=InnoDB;
 -- Replace BOTH markers with the verified source identity before provisioning.
-INSERT INTO configuration VALUES (1,1,'CONFIGURE_SOURCE_INSTANCE','CONFIGURE_SOURCE_DATABASE');
+INSERT INTO configuration VALUES (1,2,'CONFIGURE_SOURCE_INSTANCE','CONFIGURE_SOURCE_DATABASE');
 CREATE TABLE allocator_lock (
  lock_name VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY
 ) ENGINE=InnoDB;
@@ -25,6 +25,7 @@ CREATE TABLE article_binding (
  product_uuid CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
  article_id INT NOT NULL,
  created_at_sga DATETIME NULL,
+ origin_operation_uuid CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NULL,
  PRIMARY KEY (application_uuid,product_uuid),
  UNIQUE KEY article_application (application_uuid,article_id),
  KEY article_id (article_id)
