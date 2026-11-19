@@ -61,11 +61,26 @@ Evidence `ev_0d9737357ae86d468de6072b365e0c26ba901d1f52598198585815ed78cbfbcd`.
 Es inventario de archivos, no ejecución ni recuperación de VBA.
 
 Los hashes actuales difieren del corpus anterior para SGAProg y PGBiblio; Compart
-y Recalc coinciden. DAO, al leer una copia local en modo de solo lectura, devuelve
-**3110: no read definitions permission** para `Ver Lista ArtsServs Debajo Minimo`.
-El acceso SSH no otorga permisos del grupo de trabajo Access. Falta acceso
-autorizado y una empresa de prueba completamente aislada para contrastar los
-procedimientos y aplicar transacciones sin afectar la operación.
+y Recalc coinciden. El 19 de noviembre se verificó la cuenta autorizada de Access
+con una copia privada del grupo de trabajo correcto: DAO leyó **211 consultas**
+seleccionadas de SGAProg (173), Recalc (37) y PGBiblio (1), sin errores. Sus SQL
+coinciden con el corpus anterior al normalizar espacios; esto incluye
+`Ver Lista ArtsServs Debajo Minimo`. La denegación 3110 observada con el grupo de
+trabajo incorrecto queda resuelta. La adquisición usó acceso compartido y la
+tarea temporal autorizada se eliminó al terminar. No se exportan credenciales,
+el grupo de trabajo ni consultas privadas a Git.
+
+La coincidencia de las consultas no certifica los cuerpos VBA compilados ni sus
+transacciones. Falta una empresa de prueba completamente aislada, incluidos los
+accesos indirectos de PGData, para contrastar los procedimientos y aplicar
+transacciones sin afectar la operación. No se ejecutaron consultas de negocio,
+macros de aplicación ni Recalculo durante la lectura de definiciones.
+
+También se identificó el Tomcat activo y su aplicación de consulta de precios
+(`ArticuloPrecio`). Inventariar sus clases y bibliotecas no demuestra que escriba
+precios ni permite deducir las políticas de cálculo. No se reinició Java. Antes
+de habilitar una publicación será necesario certificar su interacción con SGA,
+la auditoría/historial y la detección de cambios concurrentes en el precio origen.
 
 ## Reposición
 
