@@ -13,9 +13,10 @@ Linux using PyMySQL. It does not edit the Access file or require a commercial Je
 ODBC driver. This does not certify shared writes to unrelated native Jet tables.
 
 `Articulo` is the integer identity, whereas `NombreCorto` is the commercial
-reference. Legacy imports keep their original reference mapping. New articles
-created under version 2 use the native article number as `default_code` and store
-the optional commercial reference separately. Reading MAX does not reserve a number.
+reference. All linked articles use the native number padded to at least six digits as
+`default_code`; the optional commercial reference remains separate. Historical
+normalization preserves identities, supplier codes and financial values, with a
+protected JSONL backup in the Odoo data directory. Reading MAX does not reserve a number.
 The INSERT primary key reserves it. Adapter transactions serialize on a separate
 integration row, retry native primary-key collisions up to three times and defer
 when busy. Native SGA itself does not participate in that adapter mutex; a native
@@ -38,10 +39,21 @@ A v2 create requires division and category. Its ArtsServsRefer row must be prese
 in the same transaction; otherwise the master and operation receipt roll back.
 Odoo requires this confirmation before exposing a definitive code.
 
-No costs, prices, taxes, CABYS, pack factors, stock or inventory documents are
-written. Existing pricing synchronization continues from SGA to Odoo. Article to
-service conversion, physical deletions, fiscal setup and warehouse initialization
-are outside this card contract and require a separate native workflow.
+Version 3 adds opt-in **one-time initialization** for gateway-created articles:
+CABYS, initial net unit cost, nominal VAT, source supplier and its product code.
+A protected, source-verified profile supplies activity, main/return warehouse,
+price tier and discount. The reference supplies defaults only; its CABYS, cost,
+vendor, stock and dates are never copied. Missing supplier, warehouse (zero
+balances) and price-tier rows commit in the same transaction. Existing manual
+markup and prices remain unchanged. Later card updates stay version 2 and
+never write financial data. SGA owns costs and prices after creation.
+
+Odoo requires a unique primary active source supplier, its code, positive unit cost
+matching the net supplier quote in the configured source currency, nominal CRFE
+VAT and unit UOM. Missing or ambiguous values wait visibly. `article.initialize`
+can complete a partial gateway creation only with a verified create-operation
+origin and no stock or purchase/sales history. Native conflicts stop for review.
+Service conversion, pack conversion and inventory documents remain outside scope.
 
 Each operation has one immutable UUID. A result receipt, the product UUID binding
 and the card rows commit in the same MariaDB transaction. After a lost commit
@@ -61,12 +73,19 @@ become a visible Odoo conflict, with explicit choices for either version.
 3. Create a dedicated writer account with SELECT on the SGA database and exactly
    the column-level grants enumerated by `WRITE_COLUMNS` in `article_sql.py`.
    Integration table grants are enumerated by `INTEGRATION_PRIVILEGES`. No global
-   privileges, DDL, delegation or writes to pricing/stock/tax columns are accepted.
+   privileges, DDL or delegation are accepted. Complete creation additionally needs
+   the INSERT grants in `INITIAL_COLUMNS` and the narrow UPDATE subsets accepted
+   by `assert_writer_grants(..., allow_initialization=True)`. No stock UPDATE is
+   allowed, including under this profile.
    MySQL 5.5 needs explicit INSERT/UPDATE paths for these column-level grants.
 4. Configure a protected JSON file named by `SGA_ARTICLE_WRITER_FILE`. Copy the
    example and set the verified application UUID, source, credentials and audit
    actor. The independent Odoo target config must pin that same application UUID.
-   Keep `SGA_WRITES_ENABLED=0`; other document adapters remain disabled.
+   Keep `SGA_WRITES_ENABLED=0`; other document adapters remain disabled. Complete
+   creation requires `initialization` with `reference_article`, `activity`,
+   `warehouse`, `discount` (percentage), `price_level`, `currency`, plus the paired
+   Odoo complete-creation setting. New partial v1/v2 creates then stop; durable
+   old receipts still replay with their original UUID.
 5. Run Django migrations for the sweep checkpoint. Import the native commercial
    classification masters first. Codes with unknown or ambiguous masters stop a
    page for review, without advancing its checkpoint or overwriting a local value.
@@ -131,3 +150,16 @@ automatic creation. A code is not assigned before a valid native acknowledgement
 `read_sweep_enabled=false` avoids a historical catalog sweep during that rollout.
 The dedicated account remains local to the server and has no global or DDL rights.
 Credential locations and per-column grants are documented separately from passwords.
+
+## Integration schema v2 upgrade
+
+For an existing integration schema v1, add nullable ASCII `CHAR(36)`
+`origin_operation_uuid` to its `article_binding` table and set only its
+configuration row to version 2. Do not alter SGA schemas. Backfill origins only
+after matching an immutable Odoo `article.create` payload, native receipt,
+article identity and product UUID; imported bindings retain NULL origins.
+
+The native lab fixture requires schema-only metadata for supplier and price tables,
+plus synthetic provider and price-tier parents. Tests cover atomic complete create,
+rollback after financial writes, partial completion preserving manual pricing,
+legacy receipt replay, used-article refusal and stock permission denial.

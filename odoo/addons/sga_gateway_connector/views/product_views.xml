@@ -1,4 +1,19 @@
 <odoo>
+    <record id="product_sga_creation_status" model="ir.ui.view">
+        <field name="name">product.template.sga.creation.status</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_form_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//sheet" position="before">
+                <field name="sga_creation_visible" invisible="1"/>
+                <field name="sga_reference_deferred" invisible="1"/><field name="sga_code_managed" invisible="1"/>
+                <div class="alert alert-info mb-0" role="status" invisible="not sga_creation_visible">
+                    <strong>Alta en SGA: </strong><field name="sga_creation_state" class="oe_inline"/>
+                    <div><field name="sga_creation_message" nolabel="1"/></div>
+                </div>
+            </xpath>
+        </field>
+    </record>
     <record id="product_template_form_sga_inactive" model="ir.ui.view">
         <field name="name">product.template.form.sga.inactive</field>
         <field name="model">product.template</field>
@@ -21,5 +36,13 @@
                 <separator/>
             </xpath>
         </field>
+    </record>
+    <record id="product_sga_final_reference" model="ir.ui.view">
+        <field name="name">product.template.sga.final.reference</field><field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_only_form_view"/>
+        <field name="arch" type="xml"><field name="default_code" position="attributes">
+            <attribute name="readonly">sga_reference_deferred or sga_code_managed</attribute>
+            <attribute name="placeholder">Pendiente de asignar en SGA</attribute>
+        </field></field>
     </record>
 </odoo>

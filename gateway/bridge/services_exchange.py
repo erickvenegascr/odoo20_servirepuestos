@@ -23,7 +23,7 @@ def exchange_once(client, article_writer=None):
             raise ValueError('Gateway message identity/content conflict')
         if not inbox:
             payload = message['payload']
-            article = message['kind'] == 'request' and isinstance(payload, dict) and payload.get('action') in ('article.create','article.update')
+            article = message['kind'] == 'request' and isinstance(payload, dict) and payload.get('action') in ('article.create','article.update','article.initialize')
             if article:
                 # Disabled adapters leave the original message pending for its
                 # next lease; a read-only inbox result must not poison retries.

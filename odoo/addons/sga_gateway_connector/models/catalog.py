@@ -3,6 +3,7 @@ import json
 
 from odoo import api, fields, models
 from odoo.exceptions import AccessError, ValidationError
+from .article_codes import article_code, commercial_reference
 
 
 def checksum(values):
@@ -138,7 +139,11 @@ class CatalogImport(models.AbstractModel):
                 raise ValidationError('Duplicate SGA article binding.')
             if records.sga_catalog_source_inactive and 'source_inactive' not in row:
                 raise ValidationError('The SGA article requires an explicit inactive flag.')
-            values = {'name': row['name'], 'default_code': row['default_code'],
+            reference=row.get('commercial_reference',commercial_reference(row['default_code'],article))
+            if reference is not None and (not isinstance(reference,(str,bool)) or reference is True or isinstance(reference,str) and len(reference)>20):
+                raise ValidationError('Referencia comercial SGA inválida.')
+            values = {'name': row['name'], 'default_code': article_code(article),
+                      'sga_commercial_reference':reference or False,
                       'type': 'service' if row['service'] else 'consu',
                       'is_storable': not row['service'], 'active': row['active']}
             if 'source_inactive' in row:

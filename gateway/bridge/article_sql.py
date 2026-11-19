@@ -1,4 +1,4 @@
-"""Short MariaDB transactions for article cards; never edits prices or balances.
+"""Short MariaDB card transactions and opt-in initial article setup; no balances.
 
 The integration schema must be provisioned separately. Nothing here creates or
 alters SGA tables. An operation UUID and its result commit with the business rows.
@@ -10,6 +10,7 @@ import pymysql
 
 from .article_contract import ArticleError, article_code, digest, identity, merge, next_article, request
 from .catalog_source import bit, text
+from .article_initialization import INITIAL_COLUMNS, initialize, profile
 
 
 WRITE_COLUMNS = {
@@ -24,7 +25,7 @@ INTEGRATION_PRIVILEGES = {'configuration': {'SELECT'},'allocator_lock': {'SELECT
                         'article_receipt': {'SELECT','INSERT','UPDATE'},'article_binding': {'SELECT','INSERT'}}
 
 
-def assert_writer_grants(rows, database, integration):
+def assert_writer_grants(rows, database, integration, allow_initialization=False):
     """Fail closed on global, DDL, delegation or writes to non-card columns."""
     for row in rows:
         grant=str(next(iter(row.values())))
@@ -44,6 +45,13 @@ def assert_writer_grants(rows, database, integration):
             if schema==database and privilege=='SELECT':continue
             if schema==integration and privilege in INTEGRATION_PRIVILEGES.get(table,set()) and columns is None:continue
             allowed=WRITE_COLUMNS.get(table,{}).get(privilege,set()) if schema==database else set()
+            if schema==database and allow_initialization:
+                extra=INITIAL_COLUMNS.get(table,set())
+                if privilege=='INSERT':allowed=(allowed or set())|extra
+                elif privilege=='UPDATE' and table in ('artsservs','artsservsrefer','articulosproveedor','artsservsprecios'):
+                    if table=='articulosproveedor':extra={'CodigoArticulo','PrecioCotiz','PrecioCotizDet','Usuario','Estacion','FechaActualizacion'}
+                    if table=='artsservsprecios':extra={'PorcDescto','PorcDesctoDet','Usuario','Estacion','FechaActualizacion'}
+                    allowed=(allowed or set())|(extra-{'Articulo','Proveedor','Bodega','Nivel','Prioridad'})
             if allowed is None and columns is None:continue
             actual={c.strip().strip('`') for c in columns.split(',')} if columns else set()
             if not actual or not actual<=allowed:
@@ -78,6 +86,7 @@ class ArticleSql:
                 or not 0 <= config['audit_station'] <= 32767):
             raise ArticleError('ARTICLE_WRITER_CONFIGURATION_INVALID')
         self.schema = '`' + schema + '`'
+        self.initialization_profile=profile(config['initialization']) if config.get('initialization') else None
 
     def _open(self):
         options = {key: self.config[key] for key in ('host', 'user', 'password', 'database') if key in self.config}
@@ -89,13 +98,13 @@ class ArticleSql:
         try:
             with connection.cursor() as cursor:
                 cursor.execute('SHOW GRANTS FOR CURRENT_USER()')
-                assert_writer_grants(cursor.fetchall(),self.config['database'],self.config['integration_schema'])
+                assert_writer_grants(cursor.fetchall(),self.config['database'],self.config['integration_schema'],bool(self.initialization_profile))
                 cursor.execute("SET SESSION sql_mode='STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION'")
                 cursor.execute('SET SESSION innodb_lock_wait_timeout=2')
                 cursor.execute('SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED')
                 cursor.execute('SELECT contract_version,source_instance,source_database FROM ' + self.schema + '.configuration WHERE singleton=1')
                 row = cursor.fetchone()
-                if (not row or row['contract_version'] != 1 or row['source_instance'] != self.config['source_instance']
+                if (not row or row['contract_version'] != 2 or row['source_instance'] != self.config['source_instance']
                         or row['source_database'] != self.config['database']):
                     raise ArticleError('ARTICLE_WRITER_SCHEMA_UNAVAILABLE')
                 cursor.execute('SELECT TABLE_SCHEMA,TABLE_NAME,ENGINE FROM information_schema.TABLES '
@@ -107,6 +116,9 @@ class ArticleSql:
                                                                          'article_receipt','article_binding'))]:
                     if any(engines.get((schema,n)) != 'InnoDB' for n in names):
                         raise ArticleError('ARTICLE_WRITER_REQUIRES_INNODB')
+                if self.initialization_profile and any(engines.get((self.config['database'],n))!='InnoDB'
+                        for n in ('articulosproveedor','articulosbodegas','artsservsprecios','proveedores','bodegas','preciosniveles')):
+                    raise ArticleError('ARTICLE_WRITER_REQUIRES_INNODB')
             connection.rollback()
             return connection
         except Exception:
@@ -211,12 +223,14 @@ class ArticleSql:
                 raise ArticleError('SGA_ARTICLE_REFERENCE_ALREADY_USED')
 
     def _identity(self, cursor, operation):
-        cursor.execute('SELECT article_id, created_at_sga FROM ' + self.schema +
+        cursor.execute('SELECT article_id, created_at_sga, origin_operation_uuid FROM ' + self.schema +
                        '.article_binding WHERE application_uuid=%s AND product_uuid=%s FOR UPDATE',
                        (self.application_id, operation['product_uuid']))
         binding = cursor.fetchone()
         if binding and (operation['action'] == 'article.create' or binding['article_id'] != operation['article_id']):
             raise ArticleError('ARTICLE_PRODUCT_ALREADY_BOUND')
+        if operation['action']=='article.initialize' and (not binding or not binding['origin_operation_uuid']):
+            raise ArticleError('ARTICLE_INITIALIZATION_REQUIRES_GATEWAY_CREATED_ARTICLE')
         return binding
 
     def _save_card(self, cursor, article, before, after):
@@ -284,6 +298,10 @@ class ArticleSql:
                 if existing:
                     connection.rollback()
                     return existing
+                if operation['contract']==3 and not self.initialization_profile:
+                    raise ArticleError('ARTICLE_INITIALIZATION_PROFILE_REQUIRED')
+                if self.initialization_profile and operation['action']=='article.create' and operation['contract']!=3:
+                    raise ArticleError('ARTICLE_COMPLETE_CREATION_REQUIRED')
                 # A durable operation claim shares the SGA commit. Concurrent
                 # deliveries wait on this unique key and then reuse the receipt.
                 try:
@@ -333,6 +351,7 @@ class ArticleSql:
                     if binding and binding['created_at_sga'] != created:
                         raise ArticleError('SGA_ARTICLE_CREATION_IDENTITY_CHANGED')
                     after, conflicts = merge(operation['expected'], operation['values'], before)
+                    if operation['action']=='article.initialize':after,conflicts=before,[]
                     if before['service'] != operation['expected']['service']:
                         conflicts = sorted(set(conflicts + ['service']))
                     if conflicts:
@@ -341,20 +360,26 @@ class ArticleSql:
                                   'product_uuid': operation['product_uuid'], 'fields': conflicts, 'values': before,
                                   'article_code': article_code(article)}
                         return self._finish(connection, cursor, operation, result)
-                    self._classification(cursor, after['classification'])
-                    if before['reference'] != after['reference']:
-                        self._reference(cursor, article, after['reference'])
-                    self._save_card(cursor, article, before, after)
+                    if operation['action']!='article.initialize':
+                        self._classification(cursor, after['classification'])
+                        if before['reference'] != after['reference']:
+                            self._reference(cursor, article, after['reference'])
+                        self._save_card(cursor, article, before, after)
+                initialized={}
+                if operation['contract']==3:
+                    initialized=initialize(cursor,article,operation['initialization'],self.initialization_profile,
+                        self.config['audit_user'],self.config['audit_station'])
                 actual, created = self._current(cursor, article, lock=True)
                 if not self._references_present(cursor,article):
                     raise ArticleError('SGA_ARTICLE_REFERENCES_REQUIRED')
                 if not binding:
                     cursor.execute('INSERT INTO ' + self.schema + '.article_binding '
-                                   '(application_uuid,product_uuid,article_id,created_at_sga) VALUES (%s,%s,%s,%s)',
-                                   (self.application_id, operation['product_uuid'], article, created))
+                                   '(application_uuid,product_uuid,article_id,created_at_sga,origin_operation_uuid) VALUES (%s,%s,%s,%s,%s)',
+                                   (self.application_id, operation['product_uuid'], article, created,
+                                    operation['operation_id'] if operation['action']=='article.create' else None))
                 result = {'status': 'synchronized', 'operation_id': operation['operation_id'],
                           'product_uuid': operation['product_uuid'], 'article_id': article,
-                          'article_code': article_code(article), 'references_confirmed':True, 'values': actual, 'checksum': digest(actual)}
+                          'article_code': article_code(article), 'references_confirmed':True, 'values': actual, 'checksum': digest(actual),**initialized}
                 committing = True
                 return self._finish(connection, cursor, operation, result)
         except (pymysql.err.OperationalError, pymysql.err.InterfaceError) as exc:

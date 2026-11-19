@@ -1,6 +1,6 @@
 {
     'name': 'SGA Gateway Connector',
-    'version': '20.0.1.5.0',
+    'version': '20.0.1.7.0',
     'summary': 'Read-only SGA catalog import and durable gateway outbox',
     'license': 'LGPL-3',
     'author': 'Servirepuestos',
