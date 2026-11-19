@@ -1,0 +1,11 @@
+{
+  "enabled": false,
+  "application_id": "00000000-0000-0000-0000-000000000001",
+  "source_instance": "replace-with-verified-source",
+  "source_file": "/etc/sga-gateway/catalog-source.json",
+  "currency_map": {"$": "USD", "¢": "CRC"},
+  "national_currency_code": null,
+  "replenishment_worked": null,
+  "replenishment_retained": null,
+  "replenishment_query_verified": false
+}
