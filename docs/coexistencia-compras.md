@@ -76,11 +76,14 @@ accesos indirectos de PGData, para contrastar los procedimientos y aplicar
 transacciones sin afectar la operación. No se ejecutaron consultas de negocio,
 macros de aplicación ni Recalculo durante la lectura de definiciones.
 
-También se identificó el Tomcat activo y su aplicación de consulta de precios
-(`ArticuloPrecio`). Inventariar sus clases y bibliotecas no demuestra que escriba
-precios ni permite deducir las políticas de cálculo. No se reinició Java. Antes
-de habilitar una publicación será necesario certificar su interacción con SGA,
-la auditoría/historial y la detección de cambios concurrentes en el precio origen.
+La revisión autorizada de las tres clases propias de la aplicación Java de
+consulta de precios comprobó que sus copias coinciden con los archivos
+desplegados. Esas clases consultan MySQL mediante SELECT preparados; no contienen
+un ejecutor de ingresos, costos o publicación de precios. Java seguía activo y
+no se reinició. El código y las evidencias adquiridas permanecen privados, fuera
+de Git. El alcance no incluye JSP ni bibliotecas. La escritura del gateway sigue
+requiriendo certificar las transacciones SGA, la auditoría/historial y la detección
+de cambios concurrentes en el precio origen.
 
 ## Reposición
 
