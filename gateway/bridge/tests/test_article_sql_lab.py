@@ -224,3 +224,23 @@ class ArticleSqlLab(unittest.TestCase):
                 for column in ('CostoUnit','CantDisponible','IVA'):
                     with self.assertRaises(pymysql.err.OperationalError):c.execute('UPDATE artsservs SET '+column+'=0')
         finally:connection.close()
+
+    def test_v2_allocates_native_code_without_local_reference(self):
+        from bridge.article_contract import article_code
+        op=self.request(contract=2);op['values']['reference']=None
+        result=self.writer.apply(op)
+        self.assertEqual(article_code(result['article_id']),result['article_code'])
+        self.assertTrue(result['references_confirmed'])
+        self.assertIsNone(result['values']['reference'])
+        self.assertEqual(result,self.writer.apply(op))
+        self.assertEqual(1,self.scalar('SELECT COUNT(*) FROM article_fixture.artsservsrefer WHERE Articulo=%s',(result['article_id'],)))
+
+    def test_missing_auxiliary_reference_rolls_back_master_and_receipt(self):
+        op=self.request();self.writer._save_classification=lambda *args:None
+        with self.assertRaisesRegex(ArticleError,'SGA_ARTICLE_REFERENCES_REQUIRED'):self.writer.apply(op)
+        self.assertEqual(0,self.scalar('SELECT COUNT(*) FROM article_fixture.artsservs WHERE NombreCorto=%s',(op['values']['reference'],)))
+        self.assertEqual(0,self.scalar('SELECT COUNT(*) FROM article_integration.article_receipt WHERE operation_uuid=%s',(op['operation_id'],)))
+
+    def test_initial_activation_can_be_limited_to_one_product_uuid(self):
+        op=self.request();restricted=ArticleSql({**self.config,'allowed_product_uuids':[str(uuid.uuid4())]},APP)
+        with self.assertRaisesRegex(ArticleError,'ARTICLE_PRODUCT_NOT_AUTHORIZED'):restricted.apply(op)

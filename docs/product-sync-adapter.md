@@ -13,7 +13,9 @@ Linux using PyMySQL. It does not edit the Access file or require a commercial Je
 ODBC driver. This does not certify shared writes to unrelated native Jet tables.
 
 `Articulo` is the integer identity, whereas `NombreCorto` is the commercial
-reference mapped to Odoo `default_code`. Reading MAX does not reserve a number.
+reference. Legacy imports keep their original reference mapping. New articles
+created under version 2 use the native article number as `default_code` and store
+the optional commercial reference separately. Reading MAX does not reserve a number.
 The INSERT primary key reserves it. Adapter transactions serialize on a separate
 integration row, retry native primary-key collisions up to three times and defer
 when busy. Native SGA itself does not participate in that adapter mutex; a native
@@ -23,10 +25,19 @@ NombreCorto: concurrent native changes can still introduce a duplicate reference
 
 ## Contract and ownership
 
-Version 1 supports create/update for name (70 characters), reference (20), division
+Version 1 remains compatible. Version 2 assigns the definitive Odoo internal code
+from the committed native Articulo (six-digit display), and preserves NombreCorto
+as a separate commercial reference. Before confirmation the internal code is blank.
+It never uses the independent Odoo reference sequence.
+
+The contract supports create/update for name (70 characters), reference (20), division
 and brand (3), category/subcategory (signed SMALLINT) and two native barcode slots:
 0 wholesale / 1 retail (15). SKU and article number stay separate. The retail slot
 maps to the Odoo barcode; the wholesale slot is held by the optional module.
+A v2 create requires division and category. Its ArtsServsRefer row must be present
+in the same transaction; otherwise the master and operation receipt roll back.
+Odoo requires this confirmation before exposing a definitive code.
+
 No costs, prices, taxes, CABYS, pack factors, stock or inventory documents are
 written. Existing pricing synchronization continues from SGA to Odoo. Article to
 service conversion, physical deletions, fiscal setup and warehouse initialization
@@ -94,7 +105,7 @@ Do not delete native rows to detach the systems.
 
 ## Validation
 
-- Native MariaDB 5.5.68: 18 opt-in synthetic fixture tests, including narrow grants,
+- Native MariaDB 5.5.68: 21 opt-in synthetic fixture tests, including narrow grants,
   concurrent allocators, native primary-key collision, duplicate operation,
   lost commit response, barcode collision rollback and protection of costs/stock.
 - Gateway PostgreSQL suite: 84 tests executed; 18 native MariaDB cases skipped there
@@ -106,3 +117,17 @@ Do not delete native rows to detach the systems.
 Tests are recorded separately from deployment. No production SGA article has been
 created or modified by these validations. Native form/audit parity and safe shared
 Jet file writing are not certified by this implementation.
+
+## User feedback and initial rollout
+
+All product users can read the SGA creation status on the product. The requesting
+user receives durable internal notes and live notifications for queued, confirmed,
+rejected and conflicting requests. A request still pending after five minutes
+receives one reminder per operation. Missing required classification leaves a local
+draft with an explanation; completing division/category can continue an enabled
+automatic creation. A code is not assigned before a valid native acknowledgement.
+
+`allowed_product_uuids` can restrict an initial activation to specified products.
+`read_sweep_enabled=false` avoids a historical catalog sweep during that rollout.
+The dedicated account remains local to the server and has no global or DDL rights.
+Credential locations and per-column grants are documented separately from passwords.

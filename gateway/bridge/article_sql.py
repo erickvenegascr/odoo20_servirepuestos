@@ -8,7 +8,7 @@ import re
 
 import pymysql
 
-from .article_contract import ArticleError, digest, identity, merge, next_article, request
+from .article_contract import ArticleError, article_code, digest, identity, merge, next_article, request
 from .catalog_source import bit, text
 
 
@@ -137,11 +137,14 @@ class ArticleSql:
                                    '.article_binding WHERE application_uuid=%s AND article_id=%s',
                                    (self.application_id, article))
                     binding = cursor.fetchone()
+                    if not self._references_present(cursor,article):
+                        raise ArticleError('SGA_ARTICLE_REFERENCES_REQUIRED')
                     if binding and binding['created_at_sga'] != created:
                         raise ArticleError('SGA_ARTICLE_CREATION_IDENTITY_CHANGED')
                     result.append({'article_id': article, 'values': card,
                                    'product_uuid': binding['product_uuid'] if binding else None,
-                                   'source_inactive': native['Trabajado'] == 1})
+                                   'source_inactive': native['Trabajado'] == 1,
+                                   'references_present': self._references_present(cursor,article)})
                 return result
         finally:
             connection.rollback()
@@ -178,6 +181,11 @@ class ArticleSql:
                                    'category': row['Categoria'], 'subcategory': row['SubCategoria'],
                                    'brand': text(row['Marca']) or None},
                 'barcodes': {key: codes.get(key) for key in ('0', '1')}}, row['FechaCreacion']
+
+    def _references_present(self, cursor, article):
+        cursor.execute('SELECT Articulo FROM artsservsrefer WHERE Articulo=%s', (article,))
+        row=cursor.fetchone()
+        return bool(row and row['Articulo']==article)
 
     def _classification(self, cursor, values):
         for field, table, column in [('division', 'divisiones', 'Division'),
@@ -256,6 +264,9 @@ class ArticleSql:
         operation = request(payload)
         if operation['source_instance'] != self.config['source_instance']:
             raise ArticleError('ARTICLE_SOURCE_SCOPE_MISMATCH')
+        allowed=self.config.get('allowed_product_uuids')
+        if allowed is not None and (not isinstance(allowed,list) or operation['product_uuid'] not in allowed):
+            raise ArticleError('ARTICLE_PRODUCT_NOT_AUTHORIZED')
         for attempt in range(3):
             try:
                 return self._apply(operation)
@@ -317,6 +328,8 @@ class ArticleSql:
                     before, created = self._current(cursor, article, lock=True)
                     if before is None:
                         raise ArticleError('SGA_ARTICLE_NOT_FOUND')
+                    if not self._references_present(cursor,article):
+                        raise ArticleError('SGA_ARTICLE_REFERENCES_REQUIRED')
                     if binding and binding['created_at_sga'] != created:
                         raise ArticleError('SGA_ARTICLE_CREATION_IDENTITY_CHANGED')
                     after, conflicts = merge(operation['expected'], operation['values'], before)
@@ -325,20 +338,23 @@ class ArticleSql:
                     if conflicts:
                         result = {'status': 'conflict', 'code': 'SGA_ARTICLE_EDIT_CONFLICT',
                                   'operation_id': operation['operation_id'], 'article_id': article,
-                                  'product_uuid': operation['product_uuid'], 'fields': conflicts, 'values': before}
+                                  'product_uuid': operation['product_uuid'], 'fields': conflicts, 'values': before,
+                                  'article_code': article_code(article)}
                         return self._finish(connection, cursor, operation, result)
                     self._classification(cursor, after['classification'])
                     if before['reference'] != after['reference']:
                         self._reference(cursor, article, after['reference'])
                     self._save_card(cursor, article, before, after)
                 actual, created = self._current(cursor, article, lock=True)
+                if not self._references_present(cursor,article):
+                    raise ArticleError('SGA_ARTICLE_REFERENCES_REQUIRED')
                 if not binding:
                     cursor.execute('INSERT INTO ' + self.schema + '.article_binding '
                                    '(application_uuid,product_uuid,article_id,created_at_sga) VALUES (%s,%s,%s,%s)',
                                    (self.application_id, operation['product_uuid'], article, created))
                 result = {'status': 'synchronized', 'operation_id': operation['operation_id'],
                           'product_uuid': operation['product_uuid'], 'article_id': article,
-                          'values': actual, 'checksum': digest(actual)}
+                          'article_code': article_code(article), 'references_confirmed':True, 'values': actual, 'checksum': digest(actual)}
                 committing = True
                 return self._finish(connection, cursor, operation, result)
         except (pymysql.err.OperationalError, pymysql.err.InterfaceError) as exc:

@@ -10,5 +10,7 @@
   "password": "CONFIGURE_PRIVATE_SECRET",
   "audit_mode": "transaction_receipt",
   "audit_user": "ODOO",
-  "audit_station": 0
+  "audit_station": 0,
+  "read_sweep_enabled": false,
+  "allowed_product_uuids": []
 }

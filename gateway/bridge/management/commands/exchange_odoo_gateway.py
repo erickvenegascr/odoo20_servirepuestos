@@ -20,7 +20,7 @@ class Command(BaseCommand):
             while True:
                 try:
                     count = exchange_once(client, writer)
-                    if writer is not None:
+                    if writer is not None and writer.config.get('read_sweep_enabled',True):
                         sweep_once(client, writer)
                     if count:
                         self.stdout.write(f'Odoo gateway: {count} mensaje(s) confirmado(s); comunicación confirmada.')
