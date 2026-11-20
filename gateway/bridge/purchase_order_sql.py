@@ -27,6 +27,12 @@ GRANT = re.compile(r'(SELECT|INSERT|UPDATE)(?: \(([^)]*)\))?(?:, |$)')
 RETRYABLE = {1205, 1213}
 
 
+class NativeOrderNumberConflict(RuntimeError):
+    def __init__(self, number):
+        self.number = number
+        super().__init__(number)
+
+
 class PurchaseOrderSql:
     def __init__(self, config, source_config, application_id, *, connect=pymysql.connect):
         self.config = dict(config)
@@ -85,9 +91,14 @@ class PurchaseOrderSql:
         request = validate_order_request(payload)
         if request['application_id'] != self.application_id or request['source_instance'] != self.source_instance:
             raise PurchaseEffectsError('PURCHASE_ORDER_WRITER_SCOPE_MISMATCH')
+        conflict_number = None
         for attempt in range(3):
             try:
-                return self._apply(request)
+                return self._apply(request, conflict_number)
+            except NativeOrderNumberConflict as exc:
+                conflict_number = exc.number
+                if attempt == 2:
+                    return self._number_conflict(request)
             except pymysql.err.OperationalError as exc:
                 if exc.args[0] not in RETRYABLE:
                     raise
@@ -97,7 +108,10 @@ class PurchaseOrderSql:
     def _rejection(self, request, *, exc_code, status='rejected'):
         return {key: request[key] for key in COMMON | {'request_checksum'}} | {'status': status, 'code': exc_code}
 
-    def _apply(self, request):
+    def _number_conflict(self, request):
+        return self._rejection(request, exc_code='SGA_PURCHASE_ORDER_NUMBER_CONFLICT', status='blocked')
+
+    def _apply(self, request, conflict_number=None):
         connection = self.connect(
             host=self.config['host'], port=int(self.config.get('port', 3306)),
             user=self.config['user'], password=self.config['password'], database=self.database,
@@ -127,7 +141,12 @@ class PurchaseOrderSql:
                 before = counter['Pedido']
                 cursor.execute('SELECT Pedido FROM pedidos ORDER BY Pedido DESC LIMIT 1')
                 last = cursor.fetchone()
-                if last and last['Pedido'] > before:
+                out_of_sync = last is not None and last['Pedido'] > before
+                # A native client may have reserved the number without taking
+                # our counter lock. After rollback only trust its committed counter.
+                if conflict_number is not None and (before < conflict_number or out_of_sync):
+                    return self._number_conflict(request)
+                if out_of_sync:
                     raise PurchaseEffectsError('SGA_PURCHASE_ORDER_COUNTER_OUT_OF_SYNC')
                 number = before + 1
                 result = self._save(connection, cursor, request, number)
@@ -165,10 +184,17 @@ class PurchaseOrderSql:
         order = request['order']
         vendor = order['vendor_code']
         actor = self.config['audit_user'], self.config['audit_station']
-        cursor.execute('INSERT INTO pedidos '
-                       '(Pedido,Proveedor,FechaPedido,DiasEntrega,Usuario,Estacion,FechaActualizacion) '
-                       'VALUES (%s,%s,%s,%s,%s,%s,NOW())',
-                       (number, vendor, order['date_order'], order['delivery_days'], *actor))
+        try:
+            cursor.execute('INSERT INTO pedidos '
+                           '(Pedido,Proveedor,FechaPedido,DiasEntrega,Usuario,Estacion,FechaActualizacion) '
+                           'VALUES (%s,%s,%s,%s,%s,%s,NOW())',
+                           (number, vendor, order['date_order'], order['delivery_days'], *actor))
+        except pymysql.err.IntegrityError as exc:
+            if exc.args[0] != 1062:
+                raise
+            # The approved native schema has only Pedido's PK on this table.
+            # Leave all other writes and collision types to their own handling.
+            raise NativeOrderNumberConflict(number) from None
         for line in order['lines']:
             article, quantity = line['article_id'], line['quantity']
             cursor.execute('SELECT a.Trabajado,a.Servicio,v.Deshabilitado FROM artsservs a '
