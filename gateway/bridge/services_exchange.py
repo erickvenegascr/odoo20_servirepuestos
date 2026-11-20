@@ -5,9 +5,10 @@ import uuid
 from django.utils import timezone
 from bridge.models import GatewayInbox
 from bridge.article_contract import ArticleError
+from bridge.purchase_exchange import ACTIONS as PURCHASE_ACTIONS
 
 
-def exchange_once(client, article_writer=None):
+def exchange_once(client, article_writer=None, purchase_bridge=None):
     envelope = client.call('poll')
     application = uuid.UUID(envelope['application_id'])
     expected = client.config.get('application_id') if isinstance(getattr(client, 'config', None), dict) else None
@@ -24,6 +25,8 @@ def exchange_once(client, article_writer=None):
         if not inbox:
             payload = message['payload']
             article = message['kind'] == 'request' and isinstance(payload, dict) and payload.get('action') in ('article.create','article.update','article.initialize')
+            purchase = (message['kind'] == 'request' and isinstance(payload, dict)
+                        and payload.get('action') in PURCHASE_ACTIONS)
             if article:
                 # Disabled adapters leave the original message pending for its
                 # next lease; a read-only inbox result must not poison retries.
@@ -38,6 +41,20 @@ def exchange_once(client, article_writer=None):
                         raise
                     result = {'status':'rejected','code':exc.code,'operation_id':str(message_id),
                               'product_uuid':payload.get('product_uuid')}
+            elif purchase:
+                if purchase_bridge is None:
+                    continue
+                if (str(application) != purchase_bridge.application_id
+                        or payload.get('operation_id') != str(message_id)):
+                    raise ValueError('Purchase operation/application identity mismatch')
+                result = purchase_bridge.apply(payload)
+                if result.get('status') == 'blocked':
+                    # Deliver the reason to the user without making a temporary
+                    # capability block a permanent native receipt. Reissuing the
+                    # immutable message can use a newly certified adapter later.
+                    client.call('ack', message_id=str(message_id), lease=message['lease'], result=result)
+                    count += 1
+                    continue
             else:
                 result = ({'status': 'pong', 'sga_mode': 'read_only'} if message['kind'] == 'ping'
                           else {'status': 'blocked', 'code': 'SGA_READ_ONLY', 'sga_mode': 'read_only'})
