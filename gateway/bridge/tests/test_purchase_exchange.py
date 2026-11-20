@@ -1,5 +1,5 @@
 import uuid
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from django.test import TestCase, SimpleTestCase
 
@@ -7,6 +7,7 @@ from bridge.models import GatewayInbox
 from bridge.purchase_exchange import PurchaseBridge
 from bridge.purchase_effects_contract import NativeResultUnknown, NativeResultUnverified, digest
 from bridge.tests.test_purchase_effects_contract import receive_request_v2
+from bridge.tests.test_purchase_receipt_source import scope as receipt_scope
 from bridge.services_exchange import exchange_once
 
 
@@ -15,6 +16,11 @@ def request(action='purchase.search'):
             'application_id': str(uuid.uuid4()), 'source_instance': 'lab',
             'scope': {'vendor_code': '047', 'date_from': None, 'date_to': None,
                       'order_id': None, 'include_closed': False}, 'limit': 80}
+
+
+def receipt_request(payload):
+    return {**{key: value for key, value in payload.items() if key not in ('scope', 'limit')},
+            'action': 'purchase.receipt.lookup', 'scope': receipt_scope()}
 
 
 class PurchaseBridgeTests(SimpleTestCase):
@@ -151,6 +157,62 @@ class PurchaseBridgeTests(SimpleTestCase):
         self.assertEqual(7, result['candidates'][0]['article_id'])
         self.factory.assert_not_called()
 
+    def test_receipt_scope_is_validated_before_opening_source(self):
+        factory = MagicMock()
+        bridge = PurchaseBridge(self.payload['application_id'], {'instance': 'lab'},
+                                receipt_factory=factory)
+        request_data = receipt_request(self.payload)
+        for bad_scope in (receipt_scope(order_id=True), receipt_scope(warehouse=True),
+                          receipt_scope(invoice_number=' 01234'), receipt_scope(invoice_number='0\n1'),
+                          receipt_scope(invoice_number='1' * 21), receipt_scope(sql='SELECT 1')):
+            result = bridge.apply({**request_data, 'scope': bad_scope})
+            self.assertEqual('rejected', result['status'])
+        with self.assertRaises(ValueError):
+            bridge.apply({**request_data, 'source_instance': 'other'})
+        factory.assert_not_called()
+
+    def test_receipt_missing_and_database_outage_are_distinct(self):
+        factory = MagicMock()
+        source = factory.return_value.__enter__.return_value
+        source.lookup.return_value = {'source_instance': 'lab', 'scope': receipt_scope(),
+                                      'status': 'not_found', 'receipts': []}
+        bridge = PurchaseBridge(self.payload['application_id'], {'instance': 'lab'},
+                                receipt_factory=factory)
+        request_data = receipt_request(self.payload)
+        result = bridge.apply(request_data)
+        self.assertEqual(('not_found', [], receipt_scope()),
+                         (result['status'], result['receipts'], result['scope']))
+        source.lookup.assert_called_once_with(**receipt_scope())
+        factory.return_value.__enter__.side_effect = TimeoutError('synthetic outage')
+        result = bridge.apply(request_data)
+        self.assertEqual(('unavailable', 'SGA_RECEIPT_SOURCE_UNAVAILABLE', receipt_scope()),
+                         (result['status'], result['code'], result['scope']))
+        self.assertNotIn('receipts', result)
+        self.factory.assert_not_called()
+
+    @patch('bridge.catalog_source.pymysql.connect')
+    def test_native_receipt_lookup_rejects_a_database_account_with_write_grants(self, connect):
+        connection = connect.return_value
+        cursor = connection.cursor.return_value.__enter__.return_value
+        cursor.fetchall.return_value = [{'grant': 'GRANT SELECT, UPDATE ON `fixture`.* TO `lab`@`localhost`'}]
+        bridge = PurchaseBridge(self.payload['application_id'],
+                                {'instance': 'lab', 'host': 'localhost', 'user': 'lab', 'password': 'synthetic'})
+        result = bridge.apply(receipt_request(self.payload))
+        self.assertEqual(('unavailable', 'SGA_SELECT_ONLY_ACCOUNT_REQUIRED'), (result['status'], result['code']))
+        connection.close.assert_called_once()
+        cursor.execute.assert_called_once_with('SHOW GRANTS FOR CURRENT_USER()')
+
+    def test_receipt_lookup_never_delivers_an_oversized_partial_manifest(self):
+        factory = MagicMock()
+        source = factory.return_value.__enter__.return_value
+        source.lookup.return_value = {'source_instance': 'lab', 'scope': receipt_scope(),
+                                      'status': 'found', 'receipts': [{'oversize': 'a' * 241000}]}
+        bridge = PurchaseBridge(self.payload['application_id'], {'instance': 'lab'},
+                                receipt_factory=factory)
+        result = bridge.apply(receipt_request(self.payload))
+        self.assertEqual(('conflict', 'SGA_RECEIPT_LOOKUP_TOO_BROAD'), (result['status'], result['code']))
+        self.assertNotIn('receipts', result)
+
 
 class PurchaseExchangeTests(TestCase):
     def setUp(self):
@@ -176,6 +238,22 @@ class PurchaseExchangeTests(TestCase):
         exchange_once(self.client, purchase_bridge=self.bridge)
         self.bridge.apply.assert_called_once_with(self.payload)
         self.assertTrue(GatewayInbox.objects.get().acknowledged_at)
+
+    def test_receipt_lookup_recovers_after_a_read_outage_then_replays_same_evidence(self):
+        self.message['payload'] = receipt_request(self.payload)
+        unavailable = {'status': 'unavailable', 'code': 'SGA_RECEIPT_SOURCE_UNAVAILABLE'}
+        found = {'status': 'found', 'receipts': [{'receipt_id': 75}, {'receipt_id': 79}]}
+        self.bridge.apply.side_effect = [unavailable, found]
+        self.client.call.side_effect = [self.envelope, {}, self.envelope, TimeoutError(), self.envelope, {}]
+        self.assertEqual(1, exchange_once(self.client, purchase_bridge=self.bridge))
+        self.assertFalse(GatewayInbox.objects.exists())
+        with self.assertRaises(TimeoutError):
+            exchange_once(self.client, purchase_bridge=self.bridge)
+        self.message['lease'] = str(uuid.uuid4())
+        self.assertEqual(1, exchange_once(self.client, purchase_bridge=self.bridge))
+        self.assertEqual(2, self.bridge.apply.call_count)
+        self.assertEqual(found, GatewayInbox.objects.get().result)
+        self.assertIsNotNone(GatewayInbox.objects.get().acknowledged_at)
 
     def test_block_is_shown_without_poisoning_native_retry(self):
         self.bridge.apply.return_value = {'status': 'blocked', 'code': 'BLOCKED_NATIVE_PURCHASE_NOT_CERTIFIED'}
