@@ -48,10 +48,9 @@ def exchange_once(client, article_writer=None, purchase_bridge=None):
                         or payload.get('operation_id') != str(message_id)):
                     raise ValueError('Purchase operation/application identity mismatch')
                 result = purchase_bridge.apply(payload)
-                if result.get('status') == 'blocked':
+                if result.get('status') in ('blocked', 'unavailable'):
                     # Deliver the reason to the user without making a temporary
-                    # capability block a permanent native receipt. Reissuing the
-                    # immutable message can use a newly certified adapter later.
+                    # capability block or read outage a permanent native receipt.
                     client.call('ack', message_id=str(message_id), lease=message['lease'], result=result)
                     count += 1
                     continue

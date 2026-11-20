@@ -9,8 +9,11 @@ import os
 import uuid
 from pathlib import Path
 
-from .catalog_source import configuration
+from pymysql.err import MySQLError
+
+from .catalog_source import SourceReadOnlyError, configuration
 from .purchase_source import PurchaseSource, PurchaseSourceError
+from .purchase_receipt_source import PurchaseReceiptSource, valid_scope as valid_receipt_scope
 from .purchase_replenishment import PurchaseReplenishmentSource, ReplenishmentSourceError
 from .purchase_effects_contract import (
     COMMON, NativeEffectsBoundary, NativeResultUnverified, PurchaseEffectsError,
@@ -19,7 +22,7 @@ from .purchase_order_contract import validate_order_request, validate_order_resu
 from .purchase_order_sql import PurchaseOrderSql
 
 
-ACTIONS = frozenset({'purchase.search', 'purchase.upsert', 'purchase.receive',
+ACTIONS = frozenset({'purchase.search', 'purchase.receipt.lookup', 'purchase.upsert', 'purchase.receive',
                      'purchase.reverse', 'purchase.replenish', 'price.publish'})
 MAX_RESULT_BYTES = 240000  # Odoo exchange/ack caps the whole request at 262144.
 
@@ -44,7 +47,8 @@ def _bounded_result(result, common):
 
 class PurchaseBridge:
     def __init__(self, application_id, source_config, *, source_factory=PurchaseSource,
-                 replenishment_factory=PurchaseReplenishmentSource, effects=None, order_writer=None):
+                 replenishment_factory=PurchaseReplenishmentSource, receipt_factory=PurchaseReceiptSource,
+                 effects=None, order_writer=None):
         self.application_id = str(uuid.UUID(application_id))
         self.source_instance = source_config.get('instance') or source_config.get('source_instance')
         if (not isinstance(self.source_instance, str) or not self.source_instance
@@ -53,6 +57,7 @@ class PurchaseBridge:
         self.source_config = dict(source_config)
         self.source_factory = source_factory
         self.replenishment_factory = replenishment_factory
+        self.receipt_factory = receipt_factory
         self.order_writer = order_writer
         if order_writer is not None and (order_writer.application_id != self.application_id
                                          or order_writer.source_instance != self.source_instance):
@@ -78,6 +83,8 @@ class PurchaseBridge:
     def apply(self, payload):
         common = self._common(payload)
         action = payload['action']
+        if action == 'purchase.receipt.lookup':
+            return self._lookup_receipt(payload, common)
         if action == 'purchase.replenish':
             if (set(payload) - (COMMON | {'scope', 'limit', 'after'})
                     or not COMMON | {'scope', 'limit'} <= set(payload)
@@ -137,6 +144,24 @@ class PurchaseBridge:
         # Counter allocation, PO state changes and reversals have no certified
         # native executor yet. A stub must never report a successful SGA effect.
         return {**common, 'status': 'blocked', 'code': 'BLOCKED_NATIVE_PURCHASE_NOT_CERTIFIED'}
+
+    def _lookup_receipt(self, payload, common):
+        scope = payload.get('scope')
+        if set(payload) != COMMON | {'scope'} or not valid_receipt_scope(scope):
+            return {**common, 'status': 'rejected', 'code': 'INVALID_PURCHASE_RECEIPT_LOOKUP_REQUEST'}
+        try:
+            with self.receipt_factory(self.source_config) as source:
+                result = source.lookup(**scope)
+        except (PurchaseSourceError, SourceReadOnlyError) as exc:
+            return {**common, 'scope': scope, 'status': 'unavailable', 'code': exc.code}
+        except (MySQLError, OSError):
+            return {**common, 'scope': scope, 'status': 'unavailable', 'code': 'SGA_RECEIPT_SOURCE_UNAVAILABLE'}
+        if result.get('source_instance') != self.source_instance or result.get('scope') != scope:
+            raise ValueError('Purchase receipt source or query scope changed')
+        response = {**result, **common}
+        if len(json.dumps(response, ensure_ascii=True, allow_nan=False).encode()) > MAX_RESULT_BYTES:
+            return {**common, 'scope': scope, 'status': 'conflict', 'code': 'SGA_RECEIPT_LOOKUP_TOO_BROAD'}
+        return response
 
 
 def configured_purchase_bridge(client):
