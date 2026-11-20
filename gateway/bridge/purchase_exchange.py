@@ -15,6 +15,7 @@ from .purchase_replenishment import PurchaseReplenishmentSource, ReplenishmentSo
 from .purchase_effects_contract import (
     COMMON, NativeEffectsBoundary, NativeResultUnverified, PurchaseEffectsError,
 )
+from .purchase_order_contract import validate_order_request, validate_order_result
 
 
 ACTIONS = frozenset({'purchase.search', 'purchase.upsert', 'purchase.receive',
@@ -42,7 +43,7 @@ def _bounded_result(result, common):
 
 class PurchaseBridge:
     def __init__(self, application_id, source_config, *, source_factory=PurchaseSource,
-                 replenishment_factory=PurchaseReplenishmentSource, effects=None):
+                 replenishment_factory=PurchaseReplenishmentSource, effects=None, order_writer=None):
         self.application_id = str(uuid.UUID(application_id))
         self.source_instance = source_config.get('instance') or source_config.get('source_instance')
         if (not isinstance(self.source_instance, str) or not self.source_instance
@@ -51,6 +52,10 @@ class PurchaseBridge:
         self.source_config = dict(source_config)
         self.source_factory = source_factory
         self.replenishment_factory = replenishment_factory
+        self.order_writer = order_writer
+        if order_writer is not None and (order_writer.application_id != self.application_id
+                                         or order_writer.source_instance != self.source_instance):
+            raise ValueError('Purchase order executor scope mismatch')
         self.effects = effects or NativeEffectsBoundary(self.application_id, self.source_instance)
         if (self.effects.application_id != self.application_id
                 or self.effects.source_instance != self.source_instance):
@@ -117,6 +122,17 @@ class PurchaseBridge:
             except PurchaseEffectsError as exc:
                 return {**common, 'request_checksum': payload.get('request_checksum'),
                         'status': 'rejected', 'code': exc.code}
+        if action == 'purchase.upsert' and isinstance(payload.get('order'), dict) and 'order_uuid' in payload['order']:
+            try:
+                request = validate_order_request(payload)
+            except PurchaseEffectsError as exc:
+                return {**common, 'request_checksum': payload.get('request_checksum'),
+                        'status': 'rejected', 'code': exc.code}
+            if self.order_writer is not None:
+                result = validate_order_result(self.order_writer.apply(request), payload)
+                if len(json.dumps(result, ensure_ascii=True, allow_nan=False).encode()) > MAX_RESULT_BYTES:
+                    raise NativeResultUnverified('SGA_PURCHASE_ORDER_RESULT_TOO_LARGE')
+                return result
         # Counter allocation, PO state changes and reversals have no certified
         # native executor yet. A stub must never report a successful SGA effect.
         return {**common, 'status': 'blocked', 'code': 'BLOCKED_NATIVE_PURCHASE_NOT_CERTIFIED'}
