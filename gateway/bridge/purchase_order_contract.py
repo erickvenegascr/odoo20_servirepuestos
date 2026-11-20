@@ -75,8 +75,9 @@ def validate_order_result(result, request):
             raise PurchaseEffectsError('SGA_PURCHASE_ORDER_LINES_MISMATCH')
         for actual, wanted in zip(lines, expected['lines']):
             article = wanted['article_id']
+            _id(actual['unit_factor'], maximum=MAX_SMALLINT)
             if (actual['line_key'] != [native_id, False, article] or actual['article_id'] != article
-                    or actual['por_mayor'] is not False or _id(actual['unit_factor']) != 1
+                    or actual['por_mayor'] is not False
                     or _id(actual['ordered_base']) != wanted['quantity'] or actual['received_base'] != 0
                     or actual['saldada'] is not False or actual['consignment'] is not False
                     or _number(actual['quoted_cost']) != _number(wanted['unit_cost'])):

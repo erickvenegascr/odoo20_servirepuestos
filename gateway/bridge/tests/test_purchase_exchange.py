@@ -77,7 +77,7 @@ class PurchaseBridgeTests(SimpleTestCase):
         proof = {'order_id': 66, 'vendor_code': '047', 'currency_code': 'CRC', 'currency_status': 'resolved',
                  'date_order': '2026-11-19T00:00:00', 'date_approval': None, 'delivery_days': 2,
                  'printed': False, 'processed': False, 'reorder': False, 'withdraw': False, 'eligible': True,
-                 'lines': [{'line_key': [66, False, 5], 'article_id': 5, 'por_mayor': False, 'unit_factor': 1,
+                 'lines': [{'line_key': [66, False, 5], 'article_id': 5, 'por_mayor': False, 'unit_factor': 12,
                             'ordered_base': 3, 'received_base': 0, 'quoted_cost': 70.25,
                             'saldada': False, 'consignment': False}]}
         proof['checksum'] = digest(proof)

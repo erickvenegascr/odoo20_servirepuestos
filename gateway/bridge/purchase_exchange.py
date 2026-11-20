@@ -16,6 +16,7 @@ from .purchase_effects_contract import (
     COMMON, NativeEffectsBoundary, NativeResultUnverified, PurchaseEffectsError,
 )
 from .purchase_order_contract import validate_order_request, validate_order_result
+from .purchase_order_sql import PurchaseOrderSql
 
 
 ACTIONS = frozenset({'purchase.search', 'purchase.upsert', 'purchase.receive',
@@ -157,6 +158,12 @@ def configured_purchase_bridge(client):
                 'replenishment_retained', 'replenishment_query_verified'):
         if key in config:
             source[key] = config[key]
-    # Deployment cannot activate an arbitrary callback from a JSON request or
-    # config file. A certified native adapter requires a reviewed implementation.
-    return PurchaseBridge(application, source)
+    order_writer = None
+    writer_path = config.get('order_writer_file')
+    if writer_path:
+        if not isinstance(writer_path, str) or not Path(writer_path).is_absolute():
+            raise ValueError('Purchase order writer requires an absolute configuration path')
+        writer_config = json.loads(Path(writer_path).read_text())
+        if writer_config.get('enabled') is True:
+            order_writer = PurchaseOrderSql(writer_config, source, application)
+    return PurchaseBridge(application, source, order_writer=order_writer)
