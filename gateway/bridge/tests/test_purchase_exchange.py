@@ -5,7 +5,7 @@ from django.test import TestCase, SimpleTestCase
 
 from bridge.models import GatewayInbox
 from bridge.purchase_exchange import PurchaseBridge
-from bridge.purchase_effects_contract import NativeResultUnknown
+from bridge.purchase_effects_contract import NativeResultUnknown, NativeResultUnverified, digest
 from bridge.tests.test_purchase_effects_contract import receive_request_v2
 from bridge.services_exchange import exchange_once
 
@@ -60,6 +60,49 @@ class PurchaseBridgeTests(SimpleTestCase):
         self.payload['action'] = 'purchase.upsert'
         self.assertEqual('BLOCKED_NATIVE_PURCHASE_NOT_CERTIFIED', self.bridge.apply(self.payload)['code'])
         self.factory.assert_not_called()
+
+    def standalone_request(self):
+        common = {key: value for key, value in self.payload.items() if key not in ('scope', 'limit')}
+        common['action'] = 'purchase.upsert'
+        order = {'order_uuid': common['operation_id'], 'odoo_order_id': 31, 'odoo_order_ref': 'P00031',
+                 'vendor_code': '047', 'currency': 'CRC', 'date_order': '2026-11-19', 'delivery_days': 2,
+                 'lines': [{'article_id': 5, 'source_line_id': 13, 'por_mayor': False,
+                            'unit_factor': 1, 'quantity': 3, 'unit_cost': 70.25}]}
+        return {**common, 'order': order, 'request_checksum': digest(order)}
+
+    def test_only_valid_standalone_order_reaches_its_own_writer(self):
+        payload = self.standalone_request()
+        writer = MagicMock(application_id=payload['application_id'], source_instance='lab')
+        bridge = PurchaseBridge(payload['application_id'], {'instance': 'lab'}, order_writer=writer)
+        proof = {'order_id': 66, 'vendor_code': '047', 'currency_code': 'CRC', 'currency_status': 'resolved',
+                 'date_order': '2026-11-19T00:00:00', 'date_approval': None, 'delivery_days': 2,
+                 'printed': False, 'processed': False, 'reorder': False, 'withdraw': False, 'eligible': True,
+                 'lines': [{'line_key': [66, False, 5], 'article_id': 5, 'por_mayor': False, 'unit_factor': 1,
+                            'ordered_base': 3, 'received_base': 0, 'quoted_cost': 70.25,
+                            'saldada': False, 'consignment': False}]}
+        proof['checksum'] = digest(proof)
+        result = {**payload, 'status': 'synchronized', 'order_confirmed': True,
+                  'order_uuid': payload['operation_id'], 'order': proof}
+        writer.apply.return_value = result
+        self.assertEqual(bridge.apply(payload), result)
+        writer.apply.assert_called_once_with(payload)
+        legacy = {**payload, 'order': {'invoice_revision': 'fiscal-only'}}
+        self.assertEqual(bridge.apply(legacy)['status'], 'blocked')
+        corrupt = {**payload, 'request_checksum': 'c' * 64}
+        self.assertEqual(bridge.apply(corrupt)['status'], 'rejected')
+        writer.apply.assert_called_once()
+
+    def test_valid_order_remains_blocked_without_a_writer(self):
+        self.assertEqual(self.bridge.apply(self.standalone_request())['status'], 'blocked')
+
+    def test_native_success_without_order_readback_is_retryable(self):
+        payload = self.standalone_request()
+        writer = MagicMock(application_id=payload['application_id'], source_instance='lab')
+        writer.apply.return_value = {**payload, 'status': 'synchronized', 'order_confirmed': True,
+                                     'order_uuid': payload['operation_id'], 'order': {}}
+        bridge = PurchaseBridge(payload['application_id'], {'instance': 'lab'}, order_writer=writer)
+        with self.assertRaises(NativeResultUnverified):
+            bridge.apply(payload)
 
     def test_fiscal_v2_uses_effects_boundary_without_reading_source(self):
         payload = receive_request_v2()
