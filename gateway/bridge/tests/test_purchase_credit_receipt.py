@@ -1,9 +1,11 @@
+import copy
 from datetime import datetime
 from unittest import TestCase
 from unittest.mock import Mock
 
 from bridge import purchase_effects_contract as contract
 from bridge.purchase_credit_receipt import PurchaseCreditReceiptSource
+from bridge.purchase_receipt_sql import _profile
 from bridge.tests.test_purchase_effects_contract import SOURCE, receive_request_v2, rehash
 from bridge.tests.test_purchase_receipt_source import header, line
 
@@ -20,6 +22,30 @@ def credit_request():
         'exoneration_amount': 0, 'included_in_cost': False, 'exoneration_xml': None,
     }])
     return rehash(payload)
+
+
+def liquid_credit_discount(receipt):
+    """Retain XML gross and discount while allocating the liquid cost to SGA."""
+    sources = {line['xml_line_id']: line for line in receipt['fiscal']['lines']}
+    receipt['fiscal']['lines'] = []
+    for allocation in receipt['lines']:
+        allocation.update(quantity=2, quantity_base=2, unit_factor=1, por_mayor=True,
+                          unit_cost=6660, unit_cost_base=6660)
+        order, _, article = allocation['order_line_key']
+        allocation['order_line_key'] = [order, True, article]
+        source = sources[allocation['xml_line_id']]
+        source.update(quantity=2, quantity_base=2, conversion_factor=1, conversion_mode='multiply',
+                      unit_price=7400, gross_amount=14800, net_amount=13320, net_tax_amount=1731.60,
+                      discounts=[{'code': '07', 'amount': 1480, 'nature': 'Descuento comercial',
+                                  'source_xml': '<Descuento xmlns="urn:fiscal:test"><MontoDescuento>1480.00000</MontoDescuento>'
+                                                '<CodigoDescuento>07</CodigoDescuento></Descuento>'}],
+                      taxes=[{'code': '01', 'rate_code': '08', 'rate': 13, 'base_amount': 13320,
+                              'amount': 1731.60, 'net_amount': 1731.60, 'exoneration_percentage': None,
+                              'exoneration_amount': 0, 'included_in_cost': False, 'exoneration_xml': None}])
+        receipt['fiscal']['lines'].append(source)
+    count = len(receipt['lines'])
+    receipt['totals'] = {'untaxed': 13320 * count, 'tax': 1731.60 * count, 'total': 15051.60 * count}
+    return receipt
 
 
 class PurchaseCreditReceiptTests(TestCase):
@@ -101,6 +127,53 @@ class PurchaseCreditReceiptTests(TestCase):
         self.assertEqual('SGA_CREDIT_RECEIPT_DUE_DATE_MISMATCH', result['code'])
         self.assertEqual(('2026-12-18', '2026-12-19'),
                          (result['expected_due_date'], result['native_due_date']))
+
+    def test_liquid_line_discount_qualifies_the_native_profile(self):
+        liquid_credit_discount(self.payload['receipt'])
+        checked = contract.request(rehash(self.payload))
+        self.assertEqual(checked, self.payload)
+        self.assertTrue(_profile(checked))
+        self.lines[0].update(PorMayor=1, CostoUnit=6660, NumeroUnidades=1)
+        self.details[0].update(Monto=15051.60, MontoImptoVenta=1731.60)
+        self.tax[0]['MontoImptoVenta'] = 1731.60
+        self.assertEqual('matched', self.source().verify(checked)['status'])
+
+    def test_unsupported_discount_or_tax_base_never_reaches_native_reads(self):
+        liquid_credit_discount(self.payload['receipt'])
+        for changes in ('wrong_kind', 'wrong_xml_amount', 'wrong_xml_code', 'wrong_tax_base',
+                        'wrong_line_tax', 'duplicate_discount'):
+            with self.subTest(changes=changes):
+                payload = copy.deepcopy(self.payload)
+                entry = payload['receipt']['fiscal']['lines'][0]
+                discount = entry['discounts'][0]
+                if changes == 'wrong_kind':
+                    discount['code'] = '01'
+                elif changes == 'wrong_xml_amount':
+                    discount['source_xml'] = discount['source_xml'].replace('1480.', '1479.')
+                elif changes == 'wrong_xml_code':
+                    discount['source_xml'] = discount['source_xml'].replace('>07<', '>06<')
+                elif changes == 'wrong_tax_base':
+                    entry['taxes'][0]['base_amount'] = 14800
+                elif changes == 'wrong_line_tax':
+                    entry['taxes'][0].update(amount=1731.61, net_amount=1731.61)
+                    entry['net_tax_amount'] = 1731.61
+                    payload['receipt']['totals'].update(tax=1731.61, total=15051.61)
+                else:
+                    entry['discounts'] = [{**discount, 'amount': 740}, {**discount, 'amount': 740}]
+                checked = contract.request(rehash(payload))
+                self.assertFalse(_profile(checked))
+                source = self.source()
+                with self.assertRaisesRegex(contract.PurchaseEffectsError, 'SGA_CREDIT_RECEIPT_FISCAL_CASE_UNSUPPORTED'):
+                    source.verify(checked)
+                source.rows.assert_not_called()
+
+    def test_gross_or_double_discounted_cost_does_not_reach_native_profile(self):
+        liquid_credit_discount(self.payload['receipt'])
+        for wrong in (7400, 5994):
+            with self.subTest(wrong=wrong):
+                self.payload['receipt']['lines'][0].update(unit_cost=wrong, unit_cost_base=wrong)
+                with self.assertRaisesRegex(contract.PurchaseEffectsError, 'PURCHASE_RECEIPT_UNTAXED_ALLOCATION_MISMATCH'):
+                    contract.request(rehash(self.payload))
 
     def test_unsupported_documents_and_mismatched_source_do_not_query_native_tables(self):
         source = self.source()
