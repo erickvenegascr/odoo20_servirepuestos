@@ -1,3 +1,4 @@
+import copy
 import json
 import uuid
 from unittest import TestCase
@@ -5,7 +6,9 @@ from unittest.mock import MagicMock, patch
 
 from pymysql.err import IntegrityError, OperationalError
 
-from bridge.purchase_effects_contract import NativeResultUnknown, digest
+from bridge.purchase_effects_contract import NativeResultUnknown, NativeResultUnverified, PurchaseEffectsError, digest
+from bridge.purchase_exchange import PurchaseBridge
+from bridge.purchase_order_contract import FISCALBOT_BULK_PROFILE, validate_order_request, validate_order_result
 from bridge.purchase_order_sql import PurchaseOrderSql
 
 
@@ -20,13 +23,15 @@ class PurchaseOrderNumberTests(TestCase):
         self.payload = {'contract': 1, 'action': 'purchase.upsert', 'application_id': application,
                         'operation_id': operation, 'source_instance': 'fixture', 'order': order,
                         'request_checksum': digest(order)}
-        reader = {'host': 'localhost', 'user': 'reader', 'database': 'sgadata', 'instance': 'fixture'}
-        writer = {'host': 'localhost', 'user': 'order_writer', 'password': 'synthetic', 'database': 'sgadata',
-                  'integration_schema': 'sga_order_integration', 'source_instance': 'fixture',
-                  'application_id': application, 'audit_user': 'LAB', 'audit_station': 1}
+        self.reader = {'host': 'localhost', 'user': 'reader', 'database': 'sgadata', 'instance': 'fixture'}
+        self.writer_config = {'host': 'localhost', 'user': 'order_writer', 'password': 'synthetic',
+                              'database': 'sgadata', 'integration_schema': 'sga_order_integration',
+                              'source_instance': 'fixture', 'application_id': application,
+                              'audit_user': 'LAB', 'audit_station': 1}
         self.connect = MagicMock()
-        self.writer = PurchaseOrderSql(writer, reader, application, connect=self.connect)
+        self.writer = PurchaseOrderSql(self.writer_config, self.reader, application, connect=self.connect)
         self.writer._assert_grants = MagicMock()
+        self.bulk_readback = False
         readback = patch('bridge.purchase_order_sql.PurchaseSource.search', side_effect=self.readback)
         self.addCleanup(readback.stop)
         readback.start()
@@ -35,8 +40,9 @@ class PurchaseOrderNumberTests(TestCase):
         order = {'order_id': order_id, 'vendor_code': vendor, 'currency_code': 'CRC', 'currency_status': 'resolved',
                  'date_order': '2026-11-20T00:00:00', 'date_approval': None, 'delivery_days': 1,
                  'eligible': True, 'printed': False, 'processed': False, 'reorder': False, 'withdraw': False,
-                 'lines': [{'line_key': [order_id, False, 7], 'article_id': 7, 'unit_factor': 12,
-                            'por_mayor': False, 'ordered_base': 2, 'received_base': 0,
+                 'lines': [{'line_key': [order_id, self.bulk_readback, 7], 'article_id': 7,
+                            'unit_factor': 1 if self.bulk_readback else 12,
+                            'por_mayor': self.bulk_readback, 'ordered_base': 2, 'received_base': 0,
                             'saldada': False, 'consignment': False, 'quoted_cost': 125.01}]}
         order['checksum'] = digest(order)
         return {'status': 'found', 'orders': [order]}
@@ -129,3 +135,116 @@ class PurchaseOrderNumberTests(TestCase):
         self.assertEqual(self.payload['operation_id'], result['order_uuid'])
         self.assertEqual([], self.writes(second_cursor))
         second.commit.assert_not_called()
+
+    def bulk_payload(self):
+        payload = copy.deepcopy(self.payload)
+        payload['contract'] = 2
+        payload['order'].update(profile=FISCALBOT_BULK_PROFILE, fiscalbot_document_id=15838,
+                                invoice_key='50621112600310149566000100001010000005767199999999',
+                                invoice_number='00100001010000005767')
+        payload['order']['lines'][0]['por_mayor'] = True
+        payload['request_checksum'] = digest(payload['order'])
+        return payload
+
+    def bulk_writer(self):
+        self.bulk_readback = True
+        config = dict(self.writer_config, fiscalbot_bulk_enabled=True)
+        writer = PurchaseOrderSql(config, self.reader, config['application_id'], connect=self.connect)
+        writer._assert_grants = MagicMock()
+        return writer
+
+    def bulk_connection(self, *, prior=None, fiscal_identity=None, existing_invoice_at=None):
+        connection, cursor = self.connection(100, 100)
+        opening = {'NumeroUnidades': 1, 'Trabajado': 255, 'Servicio': b'\x00', 'Combo': b'\x00',
+                   'PorLote': b'\x00', 'Consignacion': b'\x00', 'Deshabilitado': b'\x00', 'GlobalBulk': 6,
+                   'VendorBulk': 4, 'GlobalDetail': 8, 'VendorDetail': 3}
+        closing = dict(opening, GlobalBulk=8, VendorBulk=6)
+        native_invoices = [{'found': 1} if index == existing_invoice_at else None for index in range(4)]
+        cursor.fetchone.side_effect = [
+            {'Pedido': 100}, prior, fiscal_identity, *native_invoices, {'Pedido': 100}, opening, closing,
+        ]
+        return connection, cursor
+
+    def test_fiscalbot_bulk_requires_opt_in_before_opening_connection(self):
+        result = self.writer.apply(self.bulk_payload())
+        self.assertEqual(('blocked', 'BLOCKED_FISCALBOT_BULK_ORDER_NOT_ENABLED'), (result['status'], result['code']))
+        self.connect.assert_not_called()
+
+    def test_fiscalbot_bulk_increments_only_wholesale_and_records_invoice_identity(self):
+        writer = self.bulk_writer()
+        first, cursor = self.bulk_connection()
+        self.connect.side_effect = [first]
+        payload = self.bulk_payload()
+        bridge = PurchaseBridge(payload['application_id'], self.reader, order_writer=writer)
+        result = bridge.apply(payload)
+        self.assertEqual(('synchronized', 101), (result['status'], result['order']['order_id']))
+        line = result['order']['lines'][0]
+        self.assertEqual(([101, True, 7], 1), (line['line_key'], line['unit_factor']))
+        writes = self.writes(cursor)
+        self.assertEqual((101, 1, 7, 2), writes[1][1][:4])
+        self.assertEqual(['CantPedida=CantPedida+%s'] * 2, [write[0].split(' SET ')[1].split(' WHERE ')[0]
+                                                         for write in writes[2:4]])
+        journal_args = writes[-1][1]
+        self.assertEqual((payload['application_id'], payload['operation_id'], 130, 15838,
+                          payload['order']['invoice_key'], '074', payload['order']['invoice_number']), journal_args)
+        first.commit.assert_called_once_with()
+
+    def test_fiscalbot_bulk_same_uuid_replays_and_other_uuid_cannot_create_second_order(self):
+        writer = self.bulk_writer()
+        first, cursor = self.bulk_connection()
+        replay, replay_cursor = self.bulk_connection(
+            prior={'request_hash': self.bulk_payload()['request_checksum'],
+                   'result': json.dumps({'unused': True})})
+        duplicate, duplicate_cursor = self.bulk_connection(fiscal_identity={'order_uuid': self.payload['operation_id']})
+        self.connect.side_effect = [first, replay, duplicate]
+        payload = self.bulk_payload()
+        result = writer.apply(payload)
+        self.assertEqual('synchronized', result['status'])
+        replay_cursor.fetchone.side_effect = [{'Pedido': 101}, {'request_hash': payload['request_checksum'],
+                                                                'result': json.dumps(result)}]
+        self.assertEqual(result, writer.apply(payload))
+        duplicate_payload = self.bulk_payload()
+        duplicate_payload['operation_id'] = duplicate_payload['order']['order_uuid'] = str(uuid.uuid4())
+        duplicate_payload['request_checksum'] = digest(duplicate_payload['order'])
+        rejected = writer.apply(duplicate_payload)
+        self.assertEqual('SGA_FISCALBOT_PURCHASE_ORDER_ALREADY_CREATED', rejected['code'])
+        self.assertEqual([], self.writes(replay_cursor))
+        self.assertEqual([], self.writes(duplicate_cursor))
+        duplicate.rollback.assert_called_once_with()
+
+    def test_fiscalbot_contract_rejects_unapproved_presentation_factor_or_invoice(self):
+        for field, value in [('por_mayor', False), ('unit_factor', 2), ('unit_cost', 0)]:
+            with self.subTest(field=field):
+                payload = self.bulk_payload()
+                payload['order']['lines'][0][field] = value
+                payload['request_checksum'] = digest(payload['order'])
+                with self.assertRaisesRegex(PurchaseEffectsError, 'INVALID_PURCHASE_ORDER_UNIT_OR_COST'):
+                    validate_order_request(payload)
+        payload = self.bulk_payload()
+        payload['order']['invoice_key'] = 'INVALID'
+        payload['request_checksum'] = digest(payload['order'])
+        with self.assertRaisesRegex(PurchaseEffectsError, 'INVALID_FISCALBOT_PURCHASE_ORDER_PROFILE'):
+            validate_order_request(payload)
+
+    def test_fiscalbot_bulk_refuses_existing_native_receipt_or_ap_before_counter_or_order_write(self):
+        writer = self.bulk_writer()
+        for index, table in enumerate(('recibos', 'cuentaspagar', 'cuentaspagardet', 'cuentaspagardet')):
+            with self.subTest(index=index):
+                connection, cursor = self.bulk_connection(existing_invoice_at=index)
+                self.connect.side_effect = [connection]
+                result = writer.apply(self.bulk_payload())
+                self.assertEqual(('blocked', 'SGA_FISCALBOT_INVOICE_ALREADY_PRESENT'),
+                                 (result['status'], result['code']))
+                self.assertEqual([], self.writes(cursor))
+                self.assertIn('FROM ' + table + ' ', cursor.execute.call_args.args[0])
+                self.assertTrue(cursor.execute.call_args.args[0].endswith('LOCK IN SHARE MODE'))
+                connection.rollback.assert_called_once_with()
+
+    def test_fiscalbot_result_rejects_legacy_retail_readback(self):
+        payload = self.bulk_payload()
+        result = {key: payload[key] for key in ('contract', 'action', 'application_id', 'operation_id',
+                                                'source_instance', 'request_checksum')}
+        result.update(status='synchronized', order_uuid=payload['operation_id'], order_confirmed=True,
+                      order=self.readback('074', order_id=101)['orders'][0])
+        with self.assertRaisesRegex(NativeResultUnverified, 'SGA_PURCHASE_ORDER_LINE_MISMATCH'):
+            validate_order_result(result, payload)

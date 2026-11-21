@@ -23,6 +23,14 @@ WRITE_COLUMNS = {
     ('UPDATE', 'artsservs'): {'CantPedidaDet'},
     ('UPDATE', 'articulosproveedor'): {'CantPedidaDet'},
 }
+FISCAL_ORDER_TABLE = 'purchase_order_fiscal_identity'
+FISCAL_PENDING_TABLES = ('artsservs', 'articulosproveedor')
+FISCAL_INVOICE_READ_COLUMNS = {
+    'recibos': {'Proveedor', 'Factura'},
+    'cuentaspagar': {'Proveedor', 'FacturaPrimaria'},
+    'cuentaspagardet': {'Proveedor', 'FacturaPrimaria', 'Acreedor', 'Factura'},
+}
+FISCAL_CONFLICTS = {'SGA_FISCALBOT_PURCHASE_ORDER_ALREADY_CREATED', 'SGA_FISCALBOT_INVOICE_ALREADY_PRESENT'}
 GRANT = re.compile(r'(SELECT|INSERT|UPDATE)(?: \(([^)]*)\))?(?:, |$)')
 RETRYABLE = {1205, 1213}
 
@@ -41,21 +49,33 @@ class PurchaseOrderSql:
         self.source_instance = source_config.get('instance') or source_config.get('source_instance')
         self.database = source_config.get('database', 'sgadata')
         self.integration = config.get('integration_schema', '')
+        self.fiscalbot_bulk_enabled = config.get('fiscalbot_bulk_enabled', False)
         if (not self.source_instance or config.get('source_instance') != self.source_instance
                 or config.get('application_id') != application_id
                 or config.get('database') != self.database or config.get('host') != source_config.get('host')
                 or int(config.get('port', 3306)) != int(source_config.get('port', 3306))
                 or not re.fullmatch(r'[a-z][a-z0-9_]{0,39}', self.integration)
                 or self.integration == self.database or config.get('user') == source_config.get('user')
+                or type(self.fiscalbot_bulk_enabled) is not bool
                 or not re.fullmatch(r'[A-Za-z0-9_-]{1,8}', config.get('audit_user', ''))
                 or type(config.get('audit_station')) is not int or not 1 <= config['audit_station'] <= 32767):
             raise PurchaseEffectsError('PURCHASE_ORDER_WRITER_CONFIGURATION_INVALID')
         self.connect = connect
         self.receipts = f'`{self.integration}`.purchase_order_receipt'
+        self.fiscal_orders = f'`{self.integration}`.{FISCAL_ORDER_TABLE}'
 
     def _assert_grants(self, cursor):
         cursor.execute('SHOW GRANTS FOR CURRENT_USER()')
-        has_receipt_access = set()
+        journal_tables = {'purchase_order_receipt'}
+        write_columns = dict(WRITE_COLUMNS)
+        invoice_columns = FISCAL_INVOICE_READ_COLUMNS if self.fiscalbot_bulk_enabled else {}
+        invoice_reads = {}
+        if self.fiscalbot_bulk_enabled:
+            journal_tables.add(FISCAL_ORDER_TABLE)
+            for table in FISCAL_PENDING_TABLES:
+                write_columns[('UPDATE', table)] = WRITE_COLUMNS[('UPDATE', table)] | {'CantPedida'}
+        journal_access = {name: set() for name in journal_tables}
+        fiscal_updates = set()
         for row in cursor.fetchall():
             value = str(next(iter(row.values())))
             match = re.match(r'^GRANT (.*?) ON ([^ ]+) TO ', value)
@@ -71,19 +91,29 @@ class PurchaseOrderSql:
             schema, table = parts
             for item in parsed:
                 privilege, raw_columns = item.groups()
-                if schema == self.integration and table == 'purchase_order_receipt' and not raw_columns:
-                    has_receipt_access.add(privilege)
+                if schema == self.integration and table in journal_tables and not raw_columns:
+                    journal_access[table].add(privilege)
                     continue
                 columns = {part.strip().strip('`') for part in raw_columns.split(',')} if raw_columns else set()
+                if schema == self.database and table in invoice_columns and privilege == 'SELECT':
+                    if not columns or not columns <= invoice_columns[table]:
+                        raise PurchaseEffectsError('PURCHASE_ORDER_WRITER_ACCOUNT_TOO_BROAD')
+                    invoice_reads.setdefault(table, set()).update(columns)
+                    continue
                 if (schema != self.database or table not in READ_TABLES
-                        or privilege != 'SELECT' and (not columns or not columns <= WRITE_COLUMNS.get((privilege, table), set()))):
+                        or privilege != 'SELECT' and (not columns or not columns <= write_columns.get((privilege, table), set()))):
                     raise PurchaseEffectsError('PURCHASE_ORDER_WRITER_ACCOUNT_TOO_BROAD')
-        if has_receipt_access != {'SELECT', 'INSERT'}:
+                if privilege == 'UPDATE' and 'CantPedida' in columns:
+                    fiscal_updates.add(table)
+        if (any(access != {'SELECT', 'INSERT'} for access in journal_access.values())
+                or invoice_reads != invoice_columns
+                or self.fiscalbot_bulk_enabled and fiscal_updates != set(FISCAL_PENDING_TABLES)):
             raise PurchaseEffectsError('PURCHASE_ORDER_RECEIPT_GRANTS_INVALID')
         cursor.execute('SELECT TABLE_SCHEMA,TABLE_NAME,ENGINE FROM information_schema.TABLES '
                        'WHERE TABLE_SCHEMA IN (%s,%s)', (self.database, self.integration))
         engines = {(row['TABLE_SCHEMA'], row['TABLE_NAME']): row['ENGINE'] for row in cursor.fetchall()}
-        required = {(self.database, table) for table in READ_TABLES} | {(self.integration, 'purchase_order_receipt')}
+        required = {(self.database, table) for table in READ_TABLES | invoice_columns.keys()} | {
+            (self.integration, table) for table in journal_tables}
         if any(engines.get(table) != 'InnoDB' for table in required):
             raise PurchaseEffectsError('PURCHASE_ORDER_WRITER_REQUIRES_INNODB')
 
@@ -91,6 +121,8 @@ class PurchaseOrderSql:
         request = validate_order_request(payload)
         if request['application_id'] != self.application_id or request['source_instance'] != self.source_instance:
             raise PurchaseEffectsError('PURCHASE_ORDER_WRITER_SCOPE_MISMATCH')
+        if request['contract'] == 2 and not self.fiscalbot_bulk_enabled:
+            return self._rejection(request, exc_code='BLOCKED_FISCALBOT_BULK_ORDER_NOT_ENABLED', status='blocked')
         conflict_number = None
         for attempt in range(3):
             try:
@@ -124,7 +156,11 @@ class PurchaseOrderSql:
                 self._assert_grants(cursor)
                 cursor.execute("SET SESSION sql_mode='STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION'")
                 cursor.execute('SET SESSION innodb_lock_wait_timeout=2')
-                cursor.execute('SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED')
+                bulk = request['contract'] == 2
+                # Lock an exact invoice search through commit even when the
+                # native rows are still absent.
+                isolation = 'REPEATABLE READ' if bulk else 'READ COMMITTED'
+                cursor.execute(f'SET SESSION TRANSACTION ISOLATION LEVEL {isolation}')
                 connection.begin()
                 cursor.execute('SELECT Pedido FROM pgconsecutivos WHERE Llave=0 FOR UPDATE')
                 counter = cursor.fetchone()
@@ -138,8 +174,12 @@ class PurchaseOrderSql:
                     if prior['request_hash'] != request['request_checksum']:
                         raise PurchaseEffectsError('SGA_PURCHASE_ORDER_IDENTITY_CONFLICT')
                     return validate_order_result(json.loads(prior['result']), request)
+                if bulk:
+                    self._assert_fiscal_identity_available(cursor, request)
+                    self._assert_invoice_absent(cursor, request['order'])
                 before = counter['Pedido']
-                cursor.execute('SELECT Pedido FROM pedidos ORDER BY Pedido DESC LIMIT 1')
+                last_order = 'SELECT Pedido FROM pedidos ORDER BY Pedido DESC LIMIT 1'
+                cursor.execute(last_order + ' FOR UPDATE' if bulk else last_order)
                 last = cursor.fetchone()
                 out_of_sync = last is not None and last['Pedido'] > before
                 # A native client may have reserved the number without taking
@@ -160,6 +200,8 @@ class PurchaseOrderSql:
                                '(application_uuid,order_uuid,request_hash,pedido,result,created_utc) '
                                'VALUES (%s,%s,%s,%s,%s,UTC_TIMESTAMP())',
                                (*identity, request['request_checksum'], number, serialized))
+                if bulk:
+                    self._save_fiscal_identity(cursor, request)
                 committing = True
                 try:
                     connection.commit()
@@ -169,7 +211,8 @@ class PurchaseOrderSql:
         except NativeResultUnverified:
             raise
         except PurchaseEffectsError as exc:
-            return self._rejection(request, exc_code=exc.code)
+            status = 'blocked' if exc.code in FISCAL_CONFLICTS else 'rejected'
+            return self._rejection(request, exc_code=exc.code, status=status)
         finally:
             try:
                 if not committing:
@@ -180,9 +223,49 @@ class PurchaseOrderSql:
             finally:
                 connection.close()
 
+    def _assert_fiscal_identity_available(self, cursor, request):
+        order = request['order']
+        cursor.execute(f'SELECT order_uuid FROM {self.fiscal_orders} WHERE invoice_key=%s '
+                       'OR (vendor_code=%s AND invoice_number=%s) OR '
+                       '(application_uuid=%s AND (odoo_order_id=%s OR fiscalbot_document_id=%s)) LIMIT 1',
+                       (order['invoice_key'], order['vendor_code'], order['invoice_number'],
+                        request['application_id'], order['odoo_order_id'], order['fiscalbot_document_id']))
+        if cursor.fetchone():
+            raise PurchaseEffectsError('SGA_FISCALBOT_PURCHASE_ORDER_ALREADY_CREATED')
+
+    @staticmethod
+    def _assert_invoice_absent(cursor, order):
+        identity = order['vendor_code'], order['invoice_number']
+        checks = (
+            'SELECT 1 FROM recibos WHERE Proveedor=%s AND Factura=%s',
+            'SELECT 1 FROM cuentaspagar WHERE Proveedor=%s AND FacturaPrimaria=%s',
+            'SELECT 1 FROM cuentaspagardet WHERE Acreedor=%s AND Factura=%s',
+            'SELECT 1 FROM cuentaspagardet WHERE Proveedor=%s AND FacturaPrimaria=%s',
+        )
+        for sql in checks:
+            cursor.execute(sql + ' LIMIT 1 LOCK IN SHARE MODE', identity)
+            if cursor.fetchone():
+                raise PurchaseEffectsError('SGA_FISCALBOT_INVOICE_ALREADY_PRESENT')
+
+    def _save_fiscal_identity(self, cursor, request):
+        order = request['order']
+        try:
+            cursor.execute(f'INSERT INTO {self.fiscal_orders} '
+                           '(application_uuid,order_uuid,odoo_order_id,fiscalbot_document_id,invoice_key,'
+                           'vendor_code,invoice_number) VALUES (%s,%s,%s,%s,%s,%s,%s)',
+                           (request['application_id'], request['operation_id'], order['odoo_order_id'],
+                            order['fiscalbot_document_id'], order['invoice_key'], order['vendor_code'],
+                            order['invoice_number']))
+        except pymysql.err.IntegrityError as exc:
+            if exc.args[0] != 1062:
+                raise
+            raise PurchaseEffectsError('SGA_FISCALBOT_PURCHASE_ORDER_ALREADY_CREATED') from None
+
     def _save(self, connection, cursor, request, number):
         order = request['order']
         vendor = order['vendor_code']
+        bulk = request['contract'] == 2
+        pending_column = 'CantPedida' if bulk else 'CantPedidaDet'
         actor = self.config['audit_user'], self.config['audit_station']
         try:
             cursor.execute('INSERT INTO pedidos '
@@ -197,23 +280,29 @@ class PurchaseOrderSql:
             raise NativeOrderNumberConflict(number) from None
         for line in order['lines']:
             article, quantity = line['article_id'], line['quantity']
-            cursor.execute('SELECT a.Trabajado,a.Servicio,v.Deshabilitado FROM artsservs a '
-                           'JOIN articulosproveedor v ON v.Articulo=a.Articulo '
-                           'WHERE a.Articulo=%s AND v.Proveedor=%s FOR UPDATE', (article, vendor))
-            row = cursor.fetchone()
-            if not row or not row['Trabajado'] or bit(row['Servicio']) or bit(row['Deshabilitado']):
-                raise PurchaseEffectsError('SGA_PURCHASE_ORDER_ARTICLE_VENDOR_UNAVAILABLE')
+            if bulk:
+                expected_pending = self._bulk_pending(cursor, article, vendor, quantity)
+            else:
+                cursor.execute('SELECT a.Trabajado,a.Servicio,v.Deshabilitado FROM artsservs a '
+                               'JOIN articulosproveedor v ON v.Articulo=a.Articulo '
+                               'WHERE a.Articulo=%s AND v.Proveedor=%s FOR UPDATE', (article, vendor))
+                row = cursor.fetchone()
+                if not row or not row['Trabajado'] or bit(row['Servicio']) or bit(row['Deshabilitado']):
+                    raise PurchaseEffectsError('SGA_PURCHASE_ORDER_ARTICLE_VENDOR_UNAVAILABLE')
             cursor.execute('INSERT INTO pedidosarticulos '
                            '(Pedido,PorMayor,Articulo,CantPedida,UltCostoCotizado,Usuario,Estacion,FechaActualizacion) '
-                           'VALUES (%s,0,%s,%s,%s,%s,%s,NOW())', (number, article, quantity, line['unit_cost'], *actor))
-            cursor.execute('UPDATE artsservs SET CantPedidaDet=CantPedidaDet+%s WHERE Articulo=%s',
+                           'VALUES (%s,%s,%s,%s,%s,%s,%s,NOW())',
+                           (number, int(bulk), article, quantity, line['unit_cost'], *actor))
+            cursor.execute(f'UPDATE artsservs SET {pending_column}={pending_column}+%s WHERE Articulo=%s',
                            (quantity, article))
             if cursor.rowcount != 1:
                 raise PurchaseEffectsError('SGA_PURCHASE_ORDER_ARTICLE_PENDING_NOT_UPDATED')
-            cursor.execute('UPDATE articulosproveedor SET CantPedidaDet=CantPedidaDet+%s '
+            cursor.execute(f'UPDATE articulosproveedor SET {pending_column}={pending_column}+%s '
                            'WHERE Articulo=%s AND Proveedor=%s', (quantity, article, vendor))
             if cursor.rowcount != 1:
                 raise PurchaseEffectsError('SGA_PURCHASE_ORDER_VENDOR_PENDING_NOT_UPDATED')
+            if bulk and self._bulk_pending(cursor, article, vendor) != expected_pending:
+                raise PurchaseEffectsError('SGA_FISCALBOT_PURCHASE_ORDER_PENDING_MISMATCH')
         reader = PurchaseSource(self.source_config)
         reader.connection = connection
         readback = reader.search(vendor, order_id=number, include_closed=True, limit=1)
@@ -223,3 +312,21 @@ class PurchaseOrderSql:
         result.update(status='synchronized', order_confirmed=True, order_uuid=request['operation_id'],
                       order=readback['orders'][0])
         return validate_order_result(result, request)
+
+    @staticmethod
+    def _bulk_pending(cursor, article, vendor, delta=0):
+        cursor.execute('SELECT a.NumeroUnidades,a.Trabajado,a.Servicio,a.Combo,a.PorLote,a.Consignacion,'
+                       'v.Deshabilitado,a.CantPedida AS GlobalBulk,a.CantPedidaDet AS GlobalDetail,'
+                       'v.CantPedida AS VendorBulk,v.CantPedidaDet AS VendorDetail FROM artsservs a '
+                       'JOIN articulosproveedor v ON v.Articulo=a.Articulo '
+                       'WHERE a.Articulo=%s AND v.Proveedor=%s FOR UPDATE', (article, vendor))
+        row = cursor.fetchone()
+        flags = ('Servicio', 'Combo', 'PorLote', 'Consignacion', 'Deshabilitado')
+        if (not row or row['NumeroUnidades'] != 1 or row['Trabajado'] != 255
+                or any(row[field] is None or bit(row[field]) for field in flags)):
+            raise PurchaseEffectsError('SGA_FISCALBOT_PURCHASE_ORDER_ARTICLE_PROFILE_UNSUPPORTED')
+        quantities = ('GlobalBulk', 'VendorBulk', 'GlobalDetail', 'VendorDetail')
+        if any(type(row[field]) is not int or row[field] < 0 for field in quantities) or (
+                row['VendorBulk'] > row['GlobalBulk'] or row['GlobalBulk'] + delta > MAX_ID):
+            raise PurchaseEffectsError('SGA_FISCALBOT_PURCHASE_ORDER_PENDING_INVALID')
+        return row['GlobalBulk'] + delta, row['VendorBulk'] + delta, row['GlobalDetail'], row['VendorDetail']
