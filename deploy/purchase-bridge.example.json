@@ -4,6 +4,7 @@
   "source_instance": "replace-with-verified-source",
   "source_file": "/etc/sga-gateway/catalog-source.json",
   "receipt_writer_file": null,
+  "price_writer_file": null,
   "currency_map": {"$": "USD", "¢": "CRC"},
   "national_currency_code": "¢",
   "replenishment_worked": null,

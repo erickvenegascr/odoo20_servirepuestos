@@ -45,6 +45,23 @@ class PurchaseBridgeTests(SimpleTestCase):
         with self.assertRaises(TimeoutError):
             self.bridge.apply(self.payload)
 
+    def test_price_scope_is_read_only_and_a_database_outage_is_distinct(self):
+        bridge = PurchaseBridge(self.payload['application_id'], {'instance': 'lab'}, price_factory=self.factory)
+        payload = {key: value for key, value in self.payload.items() if key not in {'scope', 'limit'}}
+        payload.update(contract=2, action='price.lookup', scope={'article_ids': [14, 3], 'level': 1})
+        for bad in ({'level': 2}, {'article_ids': [14, 14]}, {'article_ids': [True]}, {'article_ids': range(2)}):
+            result = bridge.apply({**payload, 'scope': {**payload['scope'], **bad}})
+            self.assertEqual(('rejected', 'INVALID_NATIVE_PRICE_LOOKUP_SCOPE'), (result['status'], result['code']))
+        self.factory.assert_not_called()
+        rows = [{'article_id': article} for article in payload['scope']['article_ids']]
+        self.source.lookup.return_value = rows
+        result = bridge.apply(payload)
+        self.assertEqual(('found', rows, payload['scope']), (result['status'], result['prices'], result['scope']))
+        self.source.lookup.assert_called_once_with(**payload['scope'], profile=None)
+        self.factory.return_value.__enter__.side_effect = TimeoutError()
+        result = bridge.apply(payload)
+        self.assertEqual(('unavailable', 'SGA_PRICE_LOOKUP_UNAVAILABLE'), (result['status'], result['code']))
+
     def test_discovery_validates_scope_before_opening_source_and_returns_a_read_only_result(self):
         scope = {'vendor_code': None, 'vendor_tax_id': None, 'order_id': None, 'article_ids': [7, 19]}
         payload = dict(self.payload, action='purchase.discover', scope=scope)
@@ -296,6 +313,18 @@ class PurchaseExchangeTests(TestCase):
         with self.assertRaises(NativeResultUnknown):
             exchange_once(self.client, purchase_bridge=self.bridge)
         self.assertFalse(GatewayInbox.objects.exists())
+
+    def test_uncertain_price_commit_does_not_hold_up_existing_purchase_operations(self):
+        price_id = str(uuid.uuid4())
+        price = {**self.message, 'message_id': price_id,
+                 'payload': {**self.payload, 'operation_id': price_id, 'action': 'price.publish'}}
+        self.envelope['messages'].insert(0, price)
+        self.client.call.side_effect = [self.envelope, {}]
+        self.bridge.apply.side_effect = [NativeResultUnverified('SGA_PRICE_NATIVE_COMMIT_UNCONFIRMED'),
+                                       {'status': 'found', 'orders': []}]
+        with self.assertLogs('bridge.services_exchange', 'WARNING'):
+            self.assertEqual(1, exchange_once(self.client, purchase_bridge=self.bridge))
+        self.assertEqual(self.payload['operation_id'], str(GatewayInbox.objects.get().message_uuid))
 
     def test_message_and_operation_identity_cannot_diverge(self):
         self.message['message_id'] = str(uuid.uuid4())

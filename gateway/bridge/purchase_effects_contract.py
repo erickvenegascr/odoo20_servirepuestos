@@ -497,7 +497,10 @@ def execution_blockers(payload):
 
 
 def price(value, *, version=1):
-    _keys(value, PRICE_FIELDS | ({'exchange_rate'} if version == 2 else set()), 'INVALID_PURCHASE_PRICE_FIELDS')
+    fields = PRICE_FIELDS | ({'exchange_rate'} if version == 2 else set())
+    if version == 2 and isinstance(value, dict) and 'expected_native_checksum' in value:
+        fields = fields | {'expected_native_checksum'}
+    _keys(value, fields, 'INVALID_PURCHASE_PRICE_FIELDS')
     _id(value['article_id']); _id(value['level'], MAX_SMALLINT)
     _id(value['document_id']); _currency(value['currency'])
     _number(value['unit_price_excluded_tax'])
@@ -507,6 +510,8 @@ def price(value, *, version=1):
         _fail('INVALID_PURCHASE_PRICE_VAT')
     if version == 2:
         _crc(value['currency'], value['exchange_rate'])
+        if 'expected_native_checksum' in value:
+            _checksum(value['expected_native_checksum'])
     return copy.deepcopy(value)
 
 
@@ -630,19 +635,34 @@ def _receive_result(operation, result, invoice_binding):
 
 
 def _price_result(operation, result):
-    _keys(result, COMMON | {'status', 'request_checksum', 'price_confirmed', 'effective_price'},
-          'INVALID_NATIVE_PRICE_CONFIRMATION')
+    expected = operation['price']
+    fields = COMMON | {'status', 'request_checksum', 'price_confirmed', 'effective_price'}
+    if 'expected_native_checksum' in expected or 'native_price' in result:
+        fields |= {'native_price'}
+    _keys(result, fields, 'INVALID_NATIVE_PRICE_CONFIRMATION')
     if result['price_confirmed'] is not True:
         _fail('NATIVE_PRICE_UNCONFIRMED')
-    effective = result['effective_price']; expected = operation['price']
+    effective = result['effective_price']
     fields = PRICE_FIELDS | ({'exchange_rate'} if operation['contract'] == 2 else set())
     _keys(effective, fields - {'document_id'}, 'INVALID_NATIVE_EFFECTIVE_PRICE')
     checked = price({**effective, 'document_id': expected['document_id']}, version=operation['contract'])
     for key in ('article_id', 'level', 'currency', 'vat_code', 'vat_rate'):
         if type(checked[key]) is bool or checked[key] != expected[key]:
             _fail('NATIVE_PRICE_IDENTITY_MISMATCH')
-    if not _equal_money(checked['unit_price_excluded_tax'], expected['unit_price_excluded_tax']):
+    actual, wanted = (checked['unit_price_excluded_tax'], expected['unit_price_excluded_tax'])
+    matches = (Decimal(str(actual)) == Decimal(str(wanted)) if 'expected_native_checksum' in expected
+               else _equal_money(actual, wanted))
+    if not matches:
         _fail('NATIVE_EFFECTIVE_PRICE_MISMATCH')
+    if 'native_price' in result:
+        native = result['native_price']
+        _keys(native, set(effective) | {'native_checksum', 'publication_supported', 'publication_block_code'},
+              'INVALID_NATIVE_PRICE_READBACK')
+        _checksum(native['native_checksum'])
+        if (native['publication_supported'] is not True or native['publication_block_code'] is not None
+                or any(type(native[key]) is not type(value) or native[key] != value
+                       for key, value in effective.items())):
+            _fail('NATIVE_PRICE_READBACK_MISMATCH')
 
 
 def reconcile(payload, result, *, invoice_binding=None, previous_result=None):

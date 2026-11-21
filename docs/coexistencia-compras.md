@@ -116,8 +116,8 @@ siguen sin predeterminarse y la verificación de la consulta sigue en falso.
 Todas las solicitudes fijan `contract`, `action`, `operation_id`, `application_id`
 y `source_instance`. Las lecturas `purchase.search`, `purchase.discover` y
 `purchase.replenish`, y el registro de OC `purchase.upsert`, usan `contract=1`.
-`purchase.receive` y
-`price.publish` utilizan `contract=2`. El UUID es el del mensaje inmutable.
+`purchase.receive`, `price.lookup` y `price.publish` utilizan `contract=2`.
+El UUID es el del mensaje inmutable.
 Los ingresos y precios incluyen `request_checksum` del bloque correspondiente;
 una confirmación histórica de versión 1 no confirma una solicitud de versión 2.
 Los resultados exitosos
@@ -168,9 +168,30 @@ incompatibles hasta certificar cada caso. La candidata ordinaria restante es
 mercancía neta de contado en CRC; también requiere un ejecutor nativo certificado.
 Las solicitudes de efectos versión 1 quedan bloqueadas para nueva ejecución.
 
-`price.publish` versión 2 exige CRC y `exchange_rate=1`, conserva nivel, precio
-sin impuesto y código/tarifa de IVA. Solo una confirmación del precio efectivo
-nativo permite actualizar su espejo Odoo; enviar la propuesta no anuncia éxito.
+`price.lookup` acepta `scope` con `level: 1` y de uno a 50 `article_ids` únicos.
+Devuelve una fila por ID, en el orden solicitado. Cada fila contiene la moneda,
+el tipo de cambio, el IVA, el precio neto normal, la revisión `native_checksum`
+y la disponibilidad y motivo de bloqueo de la publicación. Para margen fijo,
+el precio neto Normal se calcula con el costo unitario al detalle y la suma
+del margen y la variación minorista, redondeado al centavo de CRC. La consulta
+de ventas de SGA confirmó ese cálculo en artículos cuyo sugerido guardado difería.
+
+`price.publish` versión 2 publica el detalle Normal nivel 1 en CRC, con
+`exchange_rate=1`, cuatro decimales y el IVA de SGA. La aprobación congela en
+el bloque `price` el `expected_native_checksum` obtenido de `price.lookup`.
+Una revisión distinta produce `SGA_PRICE_SOURCE_CHANGED`. La confirmación
+incluye `effective_price` y `native_price`, la fila de lectura con su nueva
+revisión para la siguiente aprobación.
+
+El escritor opcional usa `price_writer_file` y una cuenta independiente. Para
+`crc_normal_fixed_margin_retail`, ajusta la variación al detalle y el sugerido
+que le corresponde. El margen principal y el esquema de cálculo conservan su
+configuración. Publica precios al centavo y verifica el precio calculado antes
+de confirmar la transacción. El perfil separado `crc_normal_maintain_retail`
+requiere certificar esa política de venta en SGA para usarlo. La cuenta tiene
+los `SELECT` por columna declarados en `purchase_price_source.py`, `UPDATE`
+por columna en `artsservsprecios` y `SELECT`/`INSERT` del diario
+`retail_price_application` para registrar una sola confirmación por operación.
 
 La transacción nativa deberá deduplicar por operación y factura, asignar consecutivos
 con el mecanismo SGA, guardar recibo/CxP, modificar existencias y valoración,
