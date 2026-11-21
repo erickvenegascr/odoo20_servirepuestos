@@ -13,6 +13,7 @@ from .purchase_effects_contract import (
     digest, reconcile_receive, request,
 )
 from .purchase_order_sql import GRANT, RETRYABLE
+from .purchase_supplier_balance import lock_supplier_debt, set_locked_supplier_debt, supplier_money
 from .purchase_receipt_inventory_sql import (
     INVENTORY_READ_TABLES, INVENTORY_WRITE_COLUMNS, apply_receipt_inventory, lock_receipt_inventory,
 )
@@ -39,6 +40,7 @@ WRITE_COLUMNS = {
     ('INSERT', 'recibosart'): set(DETAIL_COLUMNS),
     ('INSERT', 'cuentaspagar'): set(PAYABLE_COLUMNS),
     ('INSERT', 'cuentaspagardet'): set(PAYABLE_DETAIL_COLUMNS),
+    ('UPDATE', 'proveedores'): {'MontoDeuda'},
 }
 
 
@@ -183,6 +185,7 @@ class PurchaseReceiptSql:
                     raise PurchaseEffectsError('SGA_RECEIPT_COUNTER_OUT_OF_SYNC')
                 number = last + 1
 
+                opening_debt = lock_supplier_debt(cursor, receipt['vendor_code'])
                 before = lock_receipt_inventory(cursor, receipt)
                 self._verify_order_binding(connection, receipt)
                 cursor.execute('SELECT NOW() AS applied_at')
@@ -195,6 +198,10 @@ class PurchaseReceiptSql:
                 if cursor.rowcount != 1:
                     raise PurchaseEffectsError('SGA_RECEIPT_COUNTER_CHANGED')
                 result = self._verify_documents(connection, cursor, operation, number, costs)
+                # Add only this new, verified credit. Legacy payments, notes and
+                # advances already represented in the supplier cache stay intact.
+                set_locked_supplier_debt(cursor, receipt['vendor_code'],
+                                         opening_debt + supplier_money(result['payable']['amount_total']))
                 serialized = json.dumps(result, ensure_ascii=True, allow_nan=False, sort_keys=True)
                 if len(serialized.encode('ascii')) > 240000:
                     raise PurchaseEffectsError('SGA_RECEIPT_RESULT_TOO_LARGE')

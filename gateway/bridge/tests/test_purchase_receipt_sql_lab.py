@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import pymysql
 
-from bridge.purchase_effects_contract import NativeResultUnknown, PurchaseEffectsError, request
+from bridge.purchase_effects_contract import NativeResultUnknown, request
 
 
 SOCKET = os.environ.get('SGA_RECEIPT_LAB_SOCKET')
@@ -22,6 +22,7 @@ class PurchaseReceiptSqlLabTests(unittest.TestCase):
         from bridge.purchase_receipt_sql import JOURNAL_TABLE, READ_TABLES, WRITE_COLUMNS, PurchaseReceiptSql
         from bridge.purchase_source import PurchaseSource
         from bridge.purchase_effects_contract import digest
+        from bridge.purchase_supplier_balance import supplier_money
         from bridge.purchase_valuation_snapshot import PurchaseValuationSnapshot, compare_purchase_valuation
 
         operation = request(json.loads(Path(FIXTURE).read_text()))
@@ -56,6 +57,8 @@ class PurchaseReceiptSqlLabTests(unittest.TestCase):
             cursor.execute(f'GRANT SELECT,INSERT ON `{journal}`.`{JOURNAL_TABLE}` TO %s@%s', (actor, 'localhost'))
             cursor.execute('SELECT Recibo FROM pgconsecutivos WHERE Llave=0')
             counter = cursor.fetchone()['Recibo']
+            cursor.execute('SELECT MontoDeuda FROM proveedores WHERE Proveedor=%s', (receipt['vendor_code'],))
+            opening_debt = supplier_money(cursor.fetchone()['MontoDeuda'])
 
         # Approval in production must compare the original checksum. This copy
         # can normalize transport timestamps and intentionally isolates the order.
@@ -71,19 +74,27 @@ class PurchaseReceiptSqlLabTests(unittest.TestCase):
         self.assertEqual('not_found', before['receipt_verification']['status'])
         self.assertEqual(65, sum(line['remaining'] for line in before['lines']))
 
-        class RollbackReceipt(PurchaseReceiptSql):
-            def _verify_documents(self, *args):
-                super()._verify_documents(*args)
-                raise PurchaseEffectsError('LAB_FAILURE_BEFORE_COMMIT')
+        class RollbackBeforeCommit:
+            def __init__(self, **kwargs):
+                self.connection = pymysql.connect(**kwargs)
 
-        blocked = RollbackReceipt(config, reader, operation['application_id']).apply(operation)
-        self.assertEqual(('blocked', 'LAB_FAILURE_BEFORE_COMMIT'), (blocked['status'], blocked['code']))
+            def __getattr__(self, attribute):
+                return getattr(self.connection, attribute)
+
+            def commit(self):
+                self.connection.rollback()
+                raise pymysql.err.OperationalError(2013, 'Lab rolled back before commit')
+
+        with self.assertRaises(NativeResultUnknown):
+            PurchaseReceiptSql(config, reader, operation['application_id'], connect=RollbackBeforeCommit).apply(operation)
         unchanged = proof.capture(operation)
         self.assertEqual(before['lines'], unchanged['lines'])
         self.assertEqual('not_found', unchanged['receipt_verification']['status'])
         with admin.cursor() as cursor:
             cursor.execute('SELECT Recibo FROM pgconsecutivos WHERE Llave=0')
             self.assertEqual(counter, cursor.fetchone()['Recibo'])
+            cursor.execute('SELECT MontoDeuda FROM proveedores WHERE Proveedor=%s', (receipt['vendor_code'],))
+            self.assertEqual(opening_debt, supplier_money(cursor.fetchone()['MontoDeuda']))
 
         class LostCommitResponse:
             def __init__(self, **kwargs):
@@ -124,6 +135,9 @@ class PurchaseReceiptSqlLabTests(unittest.TestCase):
         self.assertEqual(('matched', 65, 32), (comparison['status'], comparison['remaining_before'],
                                              comparison['remaining_after']), comparison)
         with admin.cursor() as cursor:
+            cursor.execute('SELECT MontoDeuda FROM proveedores WHERE Proveedor=%s', (receipt['vendor_code'],))
+            self.assertEqual(opening_debt + supplier_money(result['payable']['amount_total']),
+                             supplier_money(cursor.fetchone()['MontoDeuda']))
             cursor.execute(f'SELECT COUNT(*) AS total FROM `{journal}`.`{JOURNAL_TABLE}`')
             self.assertEqual(1, cursor.fetchone()['total'])
             cursor.execute('SELECT COUNT(*) AS total FROM recibos WHERE Proveedor=%s AND Factura=%s',
