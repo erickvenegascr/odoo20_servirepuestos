@@ -39,12 +39,16 @@ class ReceiptConflict(ValueError):
 
 
 class PurchaseReceiptSource(CatalogSource):
+    snapshot_tables = RECEIPT_TABLES
+
     def _verify_snapshot_tables(self):
+        tables = tuple(sorted(self.snapshot_tables))
+        placeholders = ','.join(['%s'] * len(tables))
         engines = self.rows(
             'SELECT TABLE_NAME, ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() '
-            'AND TABLE_NAME IN (%s,%s,%s,%s,%s)', tuple(sorted(RECEIPT_TABLES)))
+            'AND TABLE_NAME IN (' + placeholders + ')', tables)
         transactional = {row['TABLE_NAME'].lower() for row in engines if row['ENGINE'] == 'InnoDB'}
-        return transactional == RECEIPT_TABLES
+        return transactional == self.snapshot_tables
 
     def lookup(self, *, vendor_code, invoice_number, warehouse, order_id):
         scope = {'vendor_code': vendor_code, 'invoice_number': invoice_number,
