@@ -1,0 +1,15 @@
+{
+  "enabled": false,
+  "profile": "crc_iva13_credit_factor_one",
+  "evidence_reference": "",
+  "application_id": "00000000-0000-0000-0000-000000000001",
+  "source_instance": "replace-with-verified-source",
+  "host": "localhost",
+  "port": 3306,
+  "database": "sgadata",
+  "integration_schema": "sga_receipt_integration",
+  "user": "sgagw_receipts",
+  "password": "",
+  "audit_user": "ODOOSGA",
+  "audit_station": 250
+}

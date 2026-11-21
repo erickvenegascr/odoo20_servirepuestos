@@ -48,7 +48,7 @@ def _bounded_result(result, common):
 class PurchaseBridge:
     def __init__(self, application_id, source_config, *, source_factory=PurchaseSource,
                  replenishment_factory=PurchaseReplenishmentSource, receipt_factory=PurchaseReceiptSource,
-                 effects=None, order_writer=None):
+                 effects=None, order_writer=None, receipt_writer=None):
         self.application_id = str(uuid.UUID(application_id))
         self.source_instance = source_config.get('instance') or source_config.get('source_instance')
         if (not isinstance(self.source_instance, str) or not self.source_instance
@@ -62,6 +62,10 @@ class PurchaseBridge:
         if order_writer is not None and (order_writer.application_id != self.application_id
                                          or order_writer.source_instance != self.source_instance):
             raise ValueError('Purchase order executor scope mismatch')
+        self.receipt_writer = receipt_writer
+        if receipt_writer is not None and (receipt_writer.application_id != self.application_id
+                                           or receipt_writer.source_instance != self.source_instance):
+            raise ValueError('Purchase receipt executor scope mismatch')
         self.effects = effects or NativeEffectsBoundary(self.application_id, self.source_instance)
         if (self.effects.application_id != self.application_id
                 or self.effects.source_instance != self.source_instance):
@@ -124,6 +128,8 @@ class PurchaseBridge:
             return _bounded_result(result, common)
         if action in ('purchase.receive', 'price.publish'):
             try:
+                if action == 'purchase.receive' and self.receipt_writer is not None:
+                    return self.receipt_writer.apply(payload)
                 return self.effects.apply(payload)
             except NativeResultUnverified:
                 # Could follow a native commit. Retain the original operation
@@ -211,4 +217,14 @@ def configured_purchase_bridge(client):
         writer_config = json.loads(Path(writer_path).read_text())
         if writer_config.get('enabled') is True:
             order_writer = PurchaseOrderSql(writer_config, source, application)
-    return PurchaseBridge(application, source, order_writer=order_writer)
+    receipt_writer = None
+    receipt_path = config.get('receipt_writer_file')
+    if receipt_path:
+        if not isinstance(receipt_path, str) or not Path(receipt_path).is_absolute():
+            raise ValueError('Purchase receipt writer requires an absolute configuration path')
+        receipt_config = json.loads(Path(receipt_path).read_text())
+        if receipt_config.get('enabled') is True:
+            from .purchase_receipt_sql import PurchaseReceiptSql
+
+            receipt_writer = PurchaseReceiptSql(receipt_config, source, application)
+    return PurchaseBridge(application, source, order_writer=order_writer, receipt_writer=receipt_writer)
