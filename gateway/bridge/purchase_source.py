@@ -6,6 +6,7 @@ nor equates printing/processing a document with receiving its merchandise.
 import hashlib
 import json
 import math
+import re
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
@@ -14,6 +15,31 @@ from .catalog_source import CatalogSource, text
 CONTRACT = 1
 MAX_ID = 2147483647
 MAX_BATCH_LINES = 5000
+DISCOVERY_SCOPE = frozenset({'vendor_code', 'vendor_tax_id', 'order_id', 'article_ids'})
+DISCOVERY_LINE_FIELDS = ('article_id', 'article_code', 'name', 'remaining', 'remaining_base', 'unit')
+
+
+def valid_discovery_query(scope, limit, after):
+    if not isinstance(scope, dict) or set(scope) != DISCOVERY_SCOPE:
+        return False
+    vendor_code, tax_id = scope['vendor_code'], scope['vendor_tax_id']
+    order_id, articles = scope['order_id'], scope['article_ids']
+    return (
+        (vendor_code is None or isinstance(vendor_code, str) and 1 <= len(vendor_code) <= 3
+         and vendor_code == vendor_code.strip() and all(ord(char) >= 32 for char in vendor_code))
+        and (tax_id is None or vendor_code is None and isinstance(tax_id, str)
+             and re.fullmatch(r'[A-Z0-9]{1,40}', tax_id) is not None)
+        and (order_id is None or type(order_id) is int and 1 <= order_id <= MAX_ID and after == 0)
+        and isinstance(articles, list) and len(articles) <= 100
+        and all(type(article) is int and 1 <= article <= MAX_ID for article in articles)
+        and articles == sorted(set(articles))
+        and type(limit) is int and 1 <= limit <= 100
+        and type(after) is int and 0 <= after <= MAX_ID
+    )
+
+
+def _vendor_tax_id(value):
+    return re.sub(r'[- ./]', '', text(value).upper())
 
 
 class PurchaseSourceError(ValueError):
@@ -222,44 +248,14 @@ class PurchaseSource(CatalogSource):
                 clauses.append('EXISTS (SELECT 1 FROM pedidosarticulos pa JOIN artsservs a '
                     'ON a.Articulo=pa.Articulo WHERE pa.Pedido=p.Pedido AND a.Trabajado<>0 '
                     'AND (pa.CantPedida-pa.CantRecibida>0 OR (pa.Saldada=0 AND pa.CantPedida<>0)))')
-        params.append(limit + 1)
-        headers = self.rows('SELECT p.Pedido,p.Proveedor,v.ProveedorNomb,v.Activo AS VendorActive,'
-            'p.FechaPedido,p.FechaAprobacion,p.DiasEntrega,p.Comentario,p.Incoterms,'
-            'p.Impreso,p.Procesado,p.Reorden,p.Retirar,p.Usuario,p.Estacion,'
-            'p.FechaActualizacion,p.PGTS,vi.Moneda FROM pedidos p '
-            'LEFT JOIN proveedores v ON v.Proveedor=p.Proveedor '
-            'LEFT JOIN proveedoresimport vi ON vi.Proveedor=p.Proveedor WHERE '
-            + ' AND '.join(clauses) + ' ORDER BY p.Pedido DESC LIMIT %s', tuple(params))
+        headers = self._headers(clauses, params, limit)
         has_more = len(headers) > limit
         headers = headers[:limit]
-        ids = [_integer(row['Pedido'], minimum=1) for row in headers]
-        if len(set(ids)) != len(ids) or ids != sorted(ids, reverse=True):
-            raise PurchaseSourceError('SGA_PURCHASE_SOURCE_ORDER_IDENTITY_INVALID')
-        if any(text(row['Proveedor']) != vendor_code for row in headers):
-            raise PurchaseSourceError('SGA_PURCHASE_VENDOR_SCOPE_MISMATCH')
-        if order_id is not None and any(n != order_id for n in ids):
-            raise PurchaseSourceError('SGA_PURCHASE_ORDER_SCOPE_MISMATCH')
-        groups = {order: [] for order in ids}
-        if ids:
-            raw_lines = self.rows('SELECT pa.Pedido,pa.PorMayor,pa.Articulo,pa.CantPedida,pa.CantRecibida,'
-                'pa.Saldada,pa.UltCostoCotizado,pa.Consignacion,pa.FechaActualizacion AS LineUpdatedAt,'
-                'pa.PGTS AS LinePGTS,a.ArticuloNomb,a.NombreCorto,a.NumeroUnidades,a.Unidad,a.UnidadDet,'
-                # A missing catalog row must fail validation, not silently erase
-                # a native detail from a supposedly complete order snapshot.
-                'a.Trabajado FROM pedidosarticulos pa LEFT JOIN artsservs a ON a.Articulo=pa.Articulo '
-                'WHERE pa.Pedido IN (' + ','.join(['%s'] * len(ids)) + ') '
-                'ORDER BY pa.Pedido DESC,pa.PorMayor,pa.Articulo LIMIT 5001', tuple(ids))
-            if len(raw_lines) > MAX_BATCH_LINES:
-                raise PurchaseSourceError('SGA_PURCHASE_SEARCH_TOO_BROAD')
-            seen = set()
-            for row in raw_lines:
-                line = self._line(row)
-                key = tuple(line['line_key'])
-                if key in seen or key[0] not in groups:
-                    raise PurchaseSourceError('SGA_PURCHASE_SOURCE_LINE_IDENTITY_INVALID')
-                seen.add(key); groups[key[0]].append(line)
-        orders = [self._order(row, sorted(groups[row['Pedido']],
-                  key=lambda line: (line['por_mayor'], line['article_id']))) for row in headers]
+        ids = self._header_ids(headers, vendor_code, order_id)
+        raw_lines = self._raw_lines(ids)
+        if len(raw_lines) > MAX_BATCH_LINES:
+            raise PurchaseSourceError('SGA_PURCHASE_SEARCH_TOO_BROAD')
+        orders = self._orders(headers, ids, raw_lines)
         return {'contract': CONTRACT, 'status': 'found' if orders else 'not_found',
             'source_instance': self.config.get('instance') or self.config.get('source_instance'),
             'scope': {'vendor_code': vendor_code, 'date_from': start.isoformat() if start else None,
@@ -269,3 +265,157 @@ class PurchaseSource(CatalogSource):
             # A terminal empty *later page* cannot certify that the initial
             # search found nothing. A caller aggregating all pages owns that proof.
             'has_more': has_more, 'search_complete': not has_more and not after}
+
+    def discover(self, vendor_code, vendor_tax_id, order_id, article_ids, *, limit, after=0):
+        """List importable native orders using a read-only snapshot and keyset cursor."""
+        scope = {'vendor_code': vendor_code, 'vendor_tax_id': vendor_tax_id,
+                 'order_id': order_id, 'article_ids': article_ids}
+        if not valid_discovery_query(scope, limit, after):
+            raise PurchaseSourceError('INVALID_PURCHASE_DISCOVERY_REQUEST')
+        self._currency(None)
+
+        clauses, params = ['p.Pedido>0', 'v.Activo<>0'], []
+        if vendor_code is not None:
+            clauses.append('p.Proveedor=%s')
+            params.append(vendor_code)
+        if vendor_tax_id is not None:
+            # Plain REPLACE works on the deployed MariaDB 5.5.
+            clauses.append("REPLACE(REPLACE(REPLACE(REPLACE(UPPER(TRIM(v.Cedula)),"
+                           "'-', ''), ' ', ''), '.', ''), '/', '')=%s")
+            params.append(vendor_tax_id)
+        if order_id is not None:
+            clauses.append('p.Pedido=%s')
+            params.append(order_id)
+        if after:
+            clauses.append('p.Pedido<%s')
+            params.append(after)
+
+        pending = (
+            'EXISTS (SELECT 1 FROM pedidosarticulos pa JOIN artsservs a'
+            ' ON a.Articulo=pa.Articulo WHERE pa.Pedido=p.Pedido AND a.Trabajado<>0'
+            ' AND pa.Saldada=0 AND pa.CantPedida>pa.CantRecibida'
+        )
+        if article_ids:
+            pending += ' AND pa.Articulo IN (' + ','.join(['%s'] * len(article_ids)) + ')'
+            params.extend(article_ids)
+        clauses.append(pending + ')')
+
+        headers = self._headers(clauses, params, limit, include_tax_id=True)
+        has_more = len(headers) > limit
+        headers = headers[:limit]
+        ids = self._header_ids(headers, vendor_code, order_id, after=after)
+        if vendor_tax_id is not None and any(_vendor_tax_id(row['Cedula']) != vendor_tax_id
+                                              for row in headers):
+            raise PurchaseSourceError('SGA_PURCHASE_VENDOR_SCOPE_MISMATCH')
+        raw_lines = self._raw_lines(ids)
+        cursor = ids[-1] if ids else after
+        if len(raw_lines) > MAX_BATCH_LINES:
+            # The sentinel belongs to the first incomplete order. Leave that
+            # order for the next page unless it exceeds the exact import limit.
+            incomplete = _integer(raw_lines[-1]['Pedido'], minimum=1)
+            if incomplete not in ids:
+                raise PurchaseSourceError('SGA_PURCHASE_SOURCE_LINE_IDENTITY_INVALID')
+            complete_ids = [native_id for native_id in ids if native_id > incomplete]
+            if complete_ids:
+                cursor = complete_ids[-1]
+                has_more = True
+            else:
+                cursor = incomplete
+                has_more = has_more or len(ids) > 1
+            ids = complete_ids
+            raw_lines = [row for row in raw_lines if row['Pedido'] > incomplete]
+        rows = {row['Pedido']: row for row in headers if row['Pedido'] in ids}
+        articles = set(article_ids)
+        orders = []
+        for order in self._orders(rows.values(), ids, raw_lines, skip_invalid=True):
+            if (not order['eligible'] or order['currency_code'] != 'CRC'
+                    or any(line['por_mayor'] and line['unit_factor'] != 1 for line in order['lines'])):
+                continue
+            pending = [line for line in order['lines']
+                       if line['worked'] and not line['saldada'] and line['remaining'] > 0]
+            lines = [
+                {key: line[key] for key in DISCOVERY_LINE_FIELDS}
+                for line in pending if not articles or line['article_id'] in articles
+            ]
+            if lines:
+                orders.append({
+                    'order_id': order['order_id'],
+                    'vendor_code': order['vendor_code'],
+                    'vendor_name': order['vendor_name'],
+                    'vendor_tax_id': text(rows[order['order_id']]['Cedula']) or None,
+                    'date_order': order['date_order'],
+                    'currency_code': order['currency_code'],
+                    'article_ids': sorted({line['article_id'] for line in order['lines']}),
+                    'pending_article_ids': sorted({line['article_id'] for line in pending}),
+                    'lines': lines,
+                })
+        return {'contract': CONTRACT, 'status': 'found' if orders else 'not_found',
+                'source_instance': self.config.get('instance') or self.config.get('source_instance'),
+                'scope': scope, 'orders': orders, 'cursor_after': cursor,
+                'has_more': has_more, 'search_complete': not has_more and not after}
+
+    def _headers(self, clauses, params, limit, *, include_tax_id=False):
+        return self.rows(
+            'SELECT p.Pedido,p.Proveedor,v.ProveedorNomb,v.Activo AS VendorActive,'
+            'p.FechaPedido,p.FechaAprobacion,p.DiasEntrega,p.Comentario,p.Incoterms,'
+            'p.Impreso,p.Procesado,p.Reorden,p.Retirar,p.Usuario,p.Estacion,'
+            'p.FechaActualizacion,p.PGTS,vi.Moneda' + (',v.Cedula' if include_tax_id else '') +
+            ' FROM pedidos p LEFT JOIN proveedores v ON v.Proveedor=p.Proveedor '
+            'LEFT JOIN proveedoresimport vi ON vi.Proveedor=p.Proveedor WHERE '
+            + ' AND '.join(clauses) + ' ORDER BY p.Pedido DESC LIMIT %s', (*params, limit + 1))
+
+    def _header_ids(self, headers, vendor_code, order_id, *, after=0):
+        ids = [_integer(row['Pedido'], minimum=1) for row in headers]
+        if (len(set(ids)) != len(ids) or ids != sorted(ids, reverse=True)
+                or after and any(n >= after for n in ids)):
+            raise PurchaseSourceError('SGA_PURCHASE_SOURCE_ORDER_IDENTITY_INVALID')
+        if vendor_code is not None and any(text(row['Proveedor']) != vendor_code for row in headers):
+            raise PurchaseSourceError('SGA_PURCHASE_VENDOR_SCOPE_MISMATCH')
+        if order_id is not None and any(n != order_id for n in ids):
+            raise PurchaseSourceError('SGA_PURCHASE_ORDER_SCOPE_MISMATCH')
+        return ids
+
+    def _raw_lines(self, ids):
+        if not ids:
+            return []
+        return self.rows(
+            'SELECT pa.Pedido,pa.PorMayor,pa.Articulo,pa.CantPedida,pa.CantRecibida,'
+            'pa.Saldada,pa.UltCostoCotizado,pa.Consignacion,pa.FechaActualizacion AS LineUpdatedAt,'
+            'pa.PGTS AS LinePGTS,a.ArticuloNomb,a.NombreCorto,a.NumeroUnidades,a.Unidad,a.UnidadDet,'
+            # A missing catalog row must not disappear from the native snapshot.
+            'a.Trabajado FROM pedidosarticulos pa LEFT JOIN artsservs a ON a.Articulo=pa.Articulo '
+            'WHERE pa.Pedido IN (' + ','.join(['%s'] * len(ids)) + ') '
+            f'ORDER BY pa.Pedido DESC,pa.PorMayor,pa.Articulo LIMIT {MAX_BATCH_LINES + 1}', tuple(ids))
+
+    def _orders(self, headers, ids, raw_lines, *, skip_invalid=False):
+        groups = {order: [] for order in ids}
+        invalid = set()
+        seen = set()
+        for row in raw_lines:
+            order_id = _integer(row['Pedido'], minimum=1)
+            if order_id not in groups:
+                raise PurchaseSourceError('SGA_PURCHASE_SOURCE_LINE_IDENTITY_INVALID')
+            try:
+                line = self._line(row)
+            except PurchaseSourceError:
+                if not skip_invalid:
+                    raise
+                invalid.add(order_id)
+                continue
+            key = tuple(line['line_key'])
+            if key in seen:
+                raise PurchaseSourceError('SGA_PURCHASE_SOURCE_LINE_IDENTITY_INVALID')
+            seen.add(key)
+            groups[order_id].append(line)
+        orders = []
+        for row in headers:
+            order_id = row['Pedido']
+            if order_id in invalid:
+                continue
+            lines = sorted(groups[order_id], key=lambda line: (line['por_mayor'], line['article_id']))
+            try:
+                orders.append(self._order(row, lines))
+            except PurchaseSourceError:
+                if not skip_invalid:
+                    raise
+        return orders
