@@ -12,7 +12,7 @@ from pathlib import Path
 from pymysql.err import MySQLError
 
 from .catalog_source import SourceReadOnlyError, configuration
-from .purchase_source import PurchaseSource, PurchaseSourceError
+from .purchase_source import PurchaseSource, PurchaseSourceError, valid_discovery_query
 from .purchase_receipt_source import PurchaseReceiptSource, valid_scope as valid_receipt_scope
 from .purchase_replenishment import PurchaseReplenishmentSource, ReplenishmentSourceError
 from .purchase_effects_contract import (
@@ -22,14 +22,14 @@ from .purchase_order_contract import validate_order_request, validate_order_resu
 from .purchase_order_sql import PurchaseOrderSql
 
 
-ACTIONS = frozenset({'purchase.search', 'purchase.receipt.lookup', 'purchase.upsert', 'purchase.receive',
-                     'purchase.reverse', 'purchase.replenish', 'price.publish'})
+ACTIONS = frozenset({'purchase.search', 'purchase.discover', 'purchase.receipt.lookup', 'purchase.upsert',
+                     'purchase.receive', 'purchase.reverse', 'purchase.replenish', 'price.publish'})
 MAX_RESULT_BYTES = 240000  # Odoo exchange/ack caps the whole request at 262144.
 
 
 def _bounded_result(result, common):
     value = {**result, **common}
-    key = 'orders' if common['action'] == 'purchase.search' else 'candidates'
+    key = 'candidates' if common['action'] == 'purchase.replenish' else 'orders'
     while len(json.dumps(value, ensure_ascii=True, allow_nan=False).encode()) > MAX_RESULT_BYTES:
         rows = value.get(key)
         if not isinstance(rows, list) or len(rows) <= 1:
@@ -83,6 +83,8 @@ class PurchaseBridge:
     def apply(self, payload):
         common = self._common(payload)
         action = payload['action']
+        if action == 'purchase.discover':
+            return self._discover(payload, common)
         if action == 'purchase.receipt.lookup':
             return self._lookup_receipt(payload, common)
         if action == 'purchase.replenish':
@@ -144,6 +146,24 @@ class PurchaseBridge:
         # Counter allocation, PO state changes and reversals have no certified
         # native executor yet. A stub must never report a successful SGA effect.
         return {**common, 'status': 'blocked', 'code': 'BLOCKED_NATIVE_PURCHASE_NOT_CERTIFIED'}
+
+    def _discover(self, payload, common):
+        scope, limit, after = payload.get('scope'), payload.get('limit'), payload.get('after', 0)
+        if (set(payload) - (COMMON | {'scope', 'limit', 'after'})
+                or not valid_discovery_query(scope, limit, after)):
+            return {**common, 'status': 'rejected', 'code': 'INVALID_PURCHASE_DISCOVERY_REQUEST'}
+        try:
+            with self.source_factory(self.source_config) as source:
+                result = source.discover(**scope, limit=limit, after=after)
+        except PurchaseSourceError as exc:
+            return {**common, 'scope': scope, 'status': 'rejected', 'code': exc.code}
+        except SourceReadOnlyError as exc:
+            return {**common, 'scope': scope, 'status': 'unavailable', 'code': exc.code}
+        except (MySQLError, OSError):
+            return {**common, 'scope': scope, 'status': 'unavailable', 'code': 'SGA_PURCHASE_SOURCE_UNAVAILABLE'}
+        if result.get('source_instance') != self.source_instance or result.get('scope') != scope:
+            raise ValueError('Purchase discovery source or query scope changed')
+        return _bounded_result(result, common)
 
     def _lookup_receipt(self, payload, common):
         scope = payload.get('scope')

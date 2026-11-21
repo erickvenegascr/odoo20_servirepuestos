@@ -45,6 +45,35 @@ class PurchaseBridgeTests(SimpleTestCase):
         with self.assertRaises(TimeoutError):
             self.bridge.apply(self.payload)
 
+    def test_discovery_validates_scope_before_opening_source_and_returns_a_read_only_result(self):
+        scope = {'vendor_code': None, 'vendor_tax_id': None, 'order_id': None, 'article_ids': [7, 19]}
+        payload = dict(self.payload, action='purchase.discover', scope=scope)
+        malformed = ({'vendor_code': '019', 'vendor_tax_id': '010'}, {'article_ids': [19, 7]},
+                     {'article_ids': [7, 7]}, {'article_ids': [True]}, {'order_id': True},
+                     {'vendor_tax_id': ' 010 '}, {'vendor_code': '019\n'}, {'sql': 'SELECT ...'})
+        for values in malformed:
+            with self.subTest(values=values):
+                result = self.bridge.apply({**payload, 'scope': {**scope, **values}})
+                self.assertEqual('INVALID_PURCHASE_DISCOVERY_REQUEST', result['code'])
+        self.factory.assert_not_called()
+
+        self.source.discover.return_value = {
+            'source_instance': 'lab', 'scope': scope, 'status': 'found', 'orders': [{'order_id': 37}],
+        }
+        result = self.bridge.apply({**payload, 'after': 42})
+        self.assertEqual((payload['operation_id'], 'found', [{'order_id': 37}]),
+                         (result['operation_id'], result['status'], result['orders']))
+        self.source.discover.assert_called_once_with(**scope, limit=80, after=42)
+        self.source.search.assert_not_called()
+
+    def test_discovery_connection_failure_is_not_an_empty_list(self):
+        payload = dict(self.payload, action='purchase.discover',
+                       scope={'vendor_code': None, 'vendor_tax_id': None, 'order_id': None, 'article_ids': []})
+        self.factory.return_value.__enter__.side_effect = TimeoutError()
+        result = self.bridge.apply(payload)
+        self.assertEqual(('unavailable', 'SGA_PURCHASE_SOURCE_UNAVAILABLE', payload['scope']),
+                         (result['status'], result['code'], result['scope']))
+
     def test_other_source_or_application_never_opens_connection(self):
         for key in ('source_instance', 'application_id'):
             bad = dict(self.payload, **{key: str(uuid.uuid4())})

@@ -114,8 +114,9 @@ ni convierte importes por cambiar su etiqueta. Las selecciones de reposición
 siguen sin predeterminarse y la verificación de la consulta sigue en falso.
 
 Todas las solicitudes fijan `contract`, `action`, `operation_id`, `application_id`
-y `source_instance`. Las lecturas `purchase.search`/`purchase.replenish` y el
-registro de OC `purchase.upsert` conservan `contract=1`; `purchase.receive` y
+y `source_instance`. Las lecturas `purchase.search`, `purchase.discover` y
+`purchase.replenish`, y el registro de OC `purchase.upsert`, usan `contract=1`.
+`purchase.receive` y
 `price.publish` utilizan `contract=2`. El UUID es el del mensaje inmutable.
 Los ingresos y precios incluyen `request_checksum` del bloque correspondiente;
 una confirmación histórica de versión 1 no confirma una solicitud de versión 2.
@@ -129,6 +130,22 @@ La búsqueda distingue una ausencia comprobada de una página incompleta, moneda
 sin resolver, fallo de red y conflicto de datos. Las respuestas se acotan al límite
 del endpoint Odoo; se recortan solo entre órdenes completas y conservan cursor.
 Un pedido individual demasiado grande exige otro contrato; no se trunca su detalle.
+
+La consulta `purchase.discover` devuelve pedidos elegibles en CRC con cantidades
+pendientes y unidades compatibles con la importación. El filtro `scope` contiene `vendor_code`, `vendor_tax_id`,
+`order_id` y `article_ids`. El código de proveedor tiene prioridad y se usa
+solo uno de los dos identificadores de proveedor. La lista de artículos acepta
+hasta 100 identificadores distintos, ordenados de menor a mayor, y encuentra
+pedidos con cualquiera de esos artículos pendiente. Sin filtros devuelve los
+pedidos más recientes. `limit` admite 1 a 100 pedidos.
+
+Cada fila ofrece número, proveedor, fecha, moneda y un resumen de los artículos
+pendientes que coinciden. Los conjuntos `article_ids` y `pending_article_ids`
+permiten comprobar la homologación en Odoo de todas las líneas del pedido.
+Si `has_more` es verdadero, pasar `cursor_after` como
+`after` para continuar, incluso si una página quedó vacía tras validar los
+pedidos. La importación requiere seleccionar un candidato y volver a consultar
+el pedido exacto mediante `purchase.search`.
 
 ## Contrato fiscal 2 y aplicación nativa pendiente
 

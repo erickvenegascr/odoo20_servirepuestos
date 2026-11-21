@@ -150,6 +150,89 @@ class PurchaseSourceTests(TestCase):
         self.assertNotEqual(a['checksum'], c['checksum'])
         self.assertEqual(64, len(a['checksum']))
 
+    def discover(self, source, **filters):
+        query = {'vendor_code': None, 'vendor_tax_id': None, 'order_id': None,
+                 'article_ids': [], 'limit': 20}
+        return source.discover(**{**query, **filters})
+
+    def test_discovery_combines_vendor_and_articles_and_previews_only_pending_matches(self):
+        source = self.source(
+            headers=[self.header(Cedula='3-101-555555')],
+            lines=[self.line(NumeroUnidades=1), self.line(Articulo=8, NumeroUnidades=1, CantRecibida=10, Saldada=b'\x01'),
+                   self.line(Articulo=9, NumeroUnidades=1)],
+        )
+        result = self.discover(source, vendor_code='019', article_ids=[7, 8])
+        self.assertEqual('found', result['status'])
+        self.assertEqual([{
+            'order_id': 42, 'vendor_code': '019', 'vendor_name': 'Synthetic supplier',
+            'vendor_tax_id': '3-101-555555', 'date_order': '2026-11-01T10:00:00',
+            'currency_code': 'CRC', 'article_ids': [7, 8, 9], 'pending_article_ids': [7, 9], 'lines': [{
+                'article_id': 7, 'article_code': '000007', 'name': 'SYNTHETIC ARTICLE',
+                'remaining': 6, 'remaining_base': 6, 'unit': 'Caja',
+            }],
+        }], result['orders'])
+        sql, params = source.rows.call_args_list[0].args
+        self.assertIn('v.Activo<>0', sql)
+        self.assertIn('pa.Saldada=0 AND pa.CantPedida>pa.CantRecibida', sql)
+        self.assertIn('pa.Articulo IN (%s,%s)', sql)
+        self.assertEqual(('019', 7, 8, 21), params)
+
+    def test_discovery_can_browse_all_suppliers_or_resolve_an_exact_order_by_tax_number(self):
+        source = self.source(
+            headers=[self.header(Cedula=None), self.header(41, Proveedor='020', Cedula='010')],
+            lines=[self.line(NumeroUnidades=1), self.line(41, NumeroUnidades=1)],
+        )
+        result = self.discover(source)
+        self.assertEqual(['019', '020'], [order['vendor_code'] for order in result['orders']])
+        self.assertEqual((21,), source.rows.call_args_list[0].args[1])
+
+        source = self.source(headers=[self.header(Cedula='3-101-555555 ')],
+                             lines=[self.line(NumeroUnidades=1)])
+        result = self.discover(source, vendor_tax_id='3101555555', order_id=42)
+        self.assertEqual(42, result['orders'][0]['order_id'])
+        sql, params = source.rows.call_args_list[0].args
+        self.assertIn('REPLACE', sql)
+        self.assertIn('p.Pedido=%s', sql)
+        self.assertEqual(('3101555555', 42, 21), params)
+        wrong_vendor = self.source(headers=[self.header(Cedula='099')])
+        with self.assertRaisesRegex(PurchaseSourceError, 'SGA_PURCHASE_VENDOR_SCOPE_MISMATCH'):
+            self.discover(wrong_vendor, vendor_tax_id='3101555555')
+
+    def test_discovery_skips_ineligible_orders_and_preserves_a_later_page(self):
+        source = self.source(
+            headers=[self.header(42, Cedula=None), self.header(41, Cedula=None),
+                     self.header(40, Cedula=None)],
+            lines=[self.line(42, Saldada=b'\x01'), self.line(41, Trabajado=None)],
+        )
+        result = self.discover(source, limit=2)
+        self.assertEqual(('not_found', [], 41, True, False),
+                         (result['status'], result['orders'], result['cursor_after'],
+                          result['has_more'], result['search_complete']))
+
+    def test_discovery_omits_currencies_and_pack_factors_import_cannot_handle(self):
+        source = self.source(
+            headers=[self.header(42, Cedula=None, Moneda='$'),
+                     self.header(41, Cedula=None), self.header(40, Cedula=None)],
+            lines=[self.line(42, NumeroUnidades=1),
+                   self.line(41, CantRecibida=10, Saldada=b'\x01'), self.line(41, Articulo=9, NumeroUnidades=1),
+                   self.line(40, PorMayor=b'\x00')],
+        )
+        result = self.discover(source, article_ids=[7, 9])
+        self.assertEqual([40], [order['order_id'] for order in result['orders']])
+
+    @patch('bridge.purchase_source.MAX_BATCH_LINES', 1)
+    def test_discovery_paginates_before_an_incomplete_order_snapshot(self):
+        source = self.source(headers=[self.header(42, Cedula=None), self.header(41, Cedula=None)],
+                             lines=[self.line(42, NumeroUnidades=1), self.line(41, NumeroUnidades=1)])
+        result = self.discover(source, limit=2)
+        self.assertEqual(([42], 42, True), ([row['order_id'] for row in result['orders']],
+                                          result['cursor_after'], result['has_more']))
+        source = self.source(headers=[self.header(41, Cedula=None)], lines=[self.line(41, NumeroUnidades=1)])
+        result = self.discover(source, after=42)
+        self.assertEqual(([41], 41, False), ([row['order_id'] for row in result['orders']],
+                                           result['cursor_after'], result['has_more']))
+        self.assertEqual((42, 21), source.rows.call_args_list[0].args[1])
+
     @patch('bridge.catalog_source.pymysql.connect')
     def test_inherited_connection_guard_rejects_source_with_write_grants(self, connect):
         connection = connect.return_value; cursor = connection.cursor.return_value.__enter__.return_value
