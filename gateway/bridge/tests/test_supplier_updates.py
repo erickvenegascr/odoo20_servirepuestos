@@ -190,7 +190,32 @@ class SupplierExchangeTests(TestCase):
         self.assertFalse(GatewayInbox.objects.exists())
         self.client.reset_mock()
         self.writer.apply.side_effect = SupplierResultUnverified('commit outcome unknown')
-        with self.assertRaises(SupplierResultUnverified):
-            exchange_once(self.client, supplier_writer=self.writer)
+        self.assertEqual(0, exchange_once(self.client, supplier_writer=self.writer))
         self.client.call.assert_called_once_with('poll')
         self.assertFalse(GatewayInbox.objects.exists())
+
+    def test_supplier_uncertainty_does_not_delay_receipt_or_article_acknowledgements(self):
+        receipt_id, article_id = str(uuid.uuid4()), str(uuid.uuid4())
+        receipt = {'action': 'purchase.receive', 'operation_id': receipt_id}
+        article = {'action': 'article.update', 'operation_id': article_id}
+        for request in (receipt, article):
+            self.envelope['messages'].append({'message_id': request['operation_id'], 'kind': 'request',
+                                              'payload': request, 'lease': 'unrelated-lease'})
+        receipt_writer = MagicMock(application_id=self.payload['application_id'])
+        article_writer = MagicMock(application_id=self.payload['application_id'])
+        receipt_writer.apply.return_value = article_writer.apply.return_value = {'status': 'synchronized'}
+        self.writer.apply.side_effect = [SupplierResultUnverified('unknown native commit'),
+                                         pymysql.err.OperationalError(2013, 'synthetic disconnect'),
+                                         {'status': 'synchronized'}]
+        supplier_id = self.payload['operation_id']
+        for expected_acks in ([receipt_id, article_id], [receipt_id, article_id],
+                              [supplier_id, receipt_id, article_id]):
+            self.client.reset_mock()
+            self.assertEqual(len(expected_acks), exchange_once(self.client, article_writer, receipt_writer,
+                                                               supplier_writer=self.writer))
+            self.assertEqual(expected_acks, [call.kwargs['message_id'] for call in self.client.call.call_args_list
+                                             if call.args[0] == 'ack'])
+            self.assertEqual(set(expected_acks), {str(row.message_uuid) for row in GatewayInbox.objects.all()})
+        self.assertEqual([self.payload] * 3, [call.args[0] for call in self.writer.apply.call_args_list])
+        article_writer.apply.assert_called_once_with(article)
+        receipt_writer.apply.assert_called_once_with(receipt)

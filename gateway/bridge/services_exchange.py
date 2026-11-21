@@ -1,12 +1,17 @@
 import hashlib
 import json
+import logging
 import uuid
 
 from django.utils import timezone
+from pymysql.err import MySQLError
 from bridge.models import GatewayInbox
 from bridge.article_contract import ArticleError
 from bridge.purchase_exchange import ACTIONS as PURCHASE_ACTIONS
-from bridge.supplier_update_contract import ACTION as SUPPLIER_UPDATE
+from bridge.supplier_update_contract import ACTION as SUPPLIER_UPDATE, SupplierResultUnverified
+
+
+_logger = logging.getLogger(__name__)
 
 
 def exchange_once(client, article_writer=None, purchase_bridge=None, *, supplier_writer=None):
@@ -50,7 +55,12 @@ def exchange_once(client, article_writer=None, purchase_bridge=None, *, supplier
                 if (str(application) != supplier_writer.application_id
                         or payload.get('operation_id') != str(message_id)):
                     raise ValueError('Supplier operation/application identity mismatch')
-                result = supplier_writer.apply(payload)
+                try:
+                    result = supplier_writer.apply(payload)
+                except (SupplierResultUnverified, MySQLError, OSError) as exc:
+                    # The next lease must reuse this UUID. Keep processing unrelated messages.
+                    _logger.warning('Supplier update %s deferred (%s)', message_id, type(exc).__name__)
+                    continue
                 if result.get('status') == 'unavailable':
                     client.call('ack', message_id=str(message_id), lease=message['lease'], result=result)
                     count += 1
