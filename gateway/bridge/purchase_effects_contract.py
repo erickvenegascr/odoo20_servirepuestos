@@ -13,7 +13,7 @@ import math
 import re
 import uuid
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from xml.etree import ElementTree
 
 
@@ -288,6 +288,13 @@ def _money_matches(actual, expected, code):
         _fail(code)
 
 
+def _fiscal_header_money_matches(raw, reported, code):
+    # The posted bill header may contain currency cents. XML line amounts and
+    # callers that send raw totals retain the existing fiscal precision checks.
+    if reported != raw.quantize(Decimal('.01'), rounding=ROUND_HALF_UP):
+        _money_matches(raw, reported, code)
+
+
 def _terms(value, invoice_date):
     _keys(value, TERMS_FIELDS, 'INVALID_PURCHASE_PAYMENT_TERMS')
     _fiscal_code(value['condition_code'])
@@ -449,12 +456,12 @@ def fiscal(receipt_value):
         if parent not in source_ids or parent in parents:
             _fail('PURCHASE_FISCAL_PROMOTION_PARENT_INVALID')
     totals = receipt_value['totals']
-    _money_matches(net_total, _number(totals['untaxed']), 'PURCHASE_FISCAL_UNTAXED_TOTAL_MISMATCH')
-    _money_matches(tax_total, _number(totals['tax']), 'PURCHASE_FISCAL_TAX_TOTAL_MISMATCH')
+    _fiscal_header_money_matches(net_total, _number(totals['untaxed']), 'PURCHASE_FISCAL_UNTAXED_TOTAL_MISMATCH')
+    _fiscal_header_money_matches(tax_total, _number(totals['tax']), 'PURCHASE_FISCAL_TAX_TOTAL_MISMATCH')
     if refund > tax_total + MONEY_TOLERANCE:
         _fail('PURCHASE_FISCAL_REFUND_EXCEEDS_TAX')
-    _money_matches(net_total + tax_total + charge_total - refund, _number(totals['total']),
-                   'PURCHASE_FISCAL_DOCUMENT_TOTAL_MISMATCH')
+    _fiscal_header_money_matches(net_total + tax_total + charge_total - refund, _number(totals['total']),
+                                'PURCHASE_FISCAL_DOCUMENT_TOTAL_MISMATCH')
     return copy.deepcopy(value)
 
 
