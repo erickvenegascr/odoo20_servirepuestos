@@ -509,6 +509,51 @@ class PurchaseEffectsContractTests(unittest.TestCase):
         source['taxes'][0]['amount'] = 26
         self.assert_bad_request(rehash(request))
 
+    def test_v2_posted_cents_match_fractional_xml_totals_without_mutating_the_payload(self):
+        from bridge.purchase_receipt_sql import _profile
+
+        request = receive_request_v2()
+        receipt = request['receipt']
+        receipt['lines'][0].update(por_mayor=True, order_line_key=[55, True, 41],
+                                   unit_cost=52052.595, unit_cost_base=52052.595)
+        receipt['fiscal']['payment_terms'] = {'condition_code': '02', 'credit_days': 30,
+                                             'due_date': '2026-12-18', 'due_date_source': 'odoo_credit_days'}
+        receipt['fiscal']['lines'][0].update(unit_price=52052.595, gross_amount=104105.19,
+                                           net_amount=104105.19, net_tax_amount=13533.67470,
+                                           taxes=[{'code': '01', 'rate_code': '08', 'rate': 13,
+                                                   'base_amount': 104105.19, 'amount': 13533.67470,
+                                                   'net_amount': 13533.67470, 'exoneration_percentage': None,
+                                                   'exoneration_amount': 0, 'included_in_cost': False,
+                                                   'exoneration_xml': None}])
+        receipt['totals'] = {'untaxed': 104105.19000, 'tax': 13533.67470, 'total': 117638.86470}
+        self.assertEqual(contract.request(rehash(request)), request)
+        receipt['totals'] = {'untaxed': 104105.19, 'tax': 13533.67, 'total': 117638.86}
+        frozen = copy.deepcopy(rehash(request))
+        checked = contract.request(request)
+        self.assertEqual(checked, frozen)
+        self.assertTrue(_profile(checked))
+        self.assertEqual(contract.reconcile(request, native_receive(request))['status'], 'synchronized')
+        for field, amount, code in (
+                ('untaxed', 104105.20, 'PURCHASE_FISCAL_UNTAXED_TOTAL_MISMATCH'),
+                ('tax', 13533.68, 'PURCHASE_FISCAL_TAX_TOTAL_MISMATCH'),
+                ('total', 117638.87, 'PURCHASE_FISCAL_DOCUMENT_TOTAL_MISMATCH')):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(frozen)
+                changed['receipt']['totals'][field] = amount
+                self.assertEqual(self.assert_bad_request(rehash(changed)), code)
+        receipt['fiscal']['lines'][0]['net_tax_amount'] = 13533.67
+        self.assertEqual(self.assert_bad_request(rehash(request)), 'PURCHASE_FISCAL_LINE_TAX_MISMATCH')
+
+    def test_v2_header_rounding_uses_half_up_at_exact_half_cent(self):
+        request = receive_request_v2()
+        receipt = request['receipt']
+        receipt['fiscal']['lines'][0].update(unit_price=100.0025, gross_amount=200.005, net_amount=200.005)
+        receipt['lines'][0].update(unit_cost=100.0025, unit_cost_base=100.0025)
+        receipt['totals'] = {'untaxed': 200.01, 'tax': 0, 'total': 200.01}
+        self.assertEqual(contract.request(rehash(request)), request)
+        receipt['totals'].update(untaxed=200, total=200)
+        self.assertEqual(self.assert_bad_request(rehash(request)), 'PURCHASE_FISCAL_UNTAXED_TOTAL_MISMATCH')
+
     def test_v2_exoneration_legal_fragment_and_assumed_tax_are_not_lost_or_reallocated(self):
         request = receive_request_v2()
         source = request['receipt']['fiscal']['lines'][0]
