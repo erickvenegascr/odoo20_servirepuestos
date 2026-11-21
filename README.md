@@ -82,6 +82,26 @@ una operación normal. El volumen no sustituye al respaldo.
 No se incluye el core de Odoo, bases productivas, MDE, SQL adquirido, contraseñas
 anteriores ni evidencias internas en este repositorio público.
 
+## Sincronización de proveedores SGA
+
+Configure `SGA_PAYABLES_SOURCE_FILE` y `ODOO_PAYABLES_TARGET_FILE` para la
+compañía y aplicación Odoo con alcance de CxP. Desde la raíz del repositorio,
+ejecute `python gateway/manage.py sync_payables --suppliers-only` para simular
+la sincronización sin consultar facturas. Agregue `--apply` para guardar en
+Odoo los resultados de la sincronización.
+
+Agregue `--supplier-embeddings` para comparar nombres comerciales normalizados
+con OpenAI, incluso durante la simulación. El código SGA y la identificación
+fiscal se cotejan con Odoo. El correo y el IBAN se incluyen solo en la entrega
+a Odoo. Las sugerencias quedan para revisión y no establecen vínculos ni
+sobrescriben contactos. Si falla la API de OpenAI, el cotejo exacto continúa y
+los proveedores sin coincidencia exacta con candidatos quedan para revisión.
+
+Para activar esta opción, defina `SGA_SUPPLIER_OPENAI_API_KEY_FILE` con la ruta
+de un archivo de credencial dedicado, fuera de Git y legible solo por el
+usuario del servicio. Si falta o no se puede leer, la ejecución con embeddings
+se detiene. [Operación de cuentas por pagar](docs/payables.md).
+
 ## Documentación
 
 - [Arquitectura y límites](docs/architecture.md)
