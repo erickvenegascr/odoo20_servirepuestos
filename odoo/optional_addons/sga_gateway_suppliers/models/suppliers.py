@@ -39,6 +39,7 @@ class SupplierInfo(models.Model):
     sga_vendor_code = fields.Char(related='sga_binding_id.vendor_code', string='Proveedor SGA', store=True)
     sga_article_id = fields.Integer(string='Artículo SGA', readonly=True, copy=False, index=True)
     sga_disabled = fields.Boolean(string='Deshabilitado en SGA', readonly=True, copy=False)
+    sga_source_missing = fields.Boolean(string='Retirado de SGA', readonly=True, copy=False)
     sga_vendor_active = fields.Boolean(string='Proveedor activo en SGA', readonly=True, copy=False)
     sga_price_pending = fields.Boolean(string='Precio pendiente', compute='_compute_sga_price_pending', store=True)
     sga_source_checksum = fields.Char(readonly=True, copy=False, groups='base.group_system')
@@ -55,7 +56,7 @@ class SupplierInfo(models.Model):
     def _get_filtered_supplier(self, company_id, product_id, params=False):
         rows = super()._get_filtered_supplier(company_id, product_id, params)
         return rows.filtered(lambda s: not s.sga_binding_id or (
-            not s.sga_disabled and s.sga_vendor_active and not s.sga_price_pending))
+            not s.sga_disabled and not s.sga_source_missing and s.sga_vendor_active and not s.sga_price_pending))
 
 
 class Product(models.Model):
@@ -80,14 +81,54 @@ class SupplierImport(models.AbstractModel):
                 'sequence': row.sequence, 'product_code': row.product_code or '',
                 'disabled': row.sga_disabled, 'vendor_active': row.sga_vendor_active}
 
+    def _lock_source(self, company, instance):
+        lock = int(digest(['suppliers', company.id, instance])[:15], 16)
+        self.env.cr.execute('SELECT pg_advisory_xact_lock(%s)', [lock])
+
+    def _flag_missing(self, instance, relations, dry_run=True):
+        if (not isinstance(instance, str) or not 1 <= len(instance) <= 80 or type(dry_run) is not bool
+                or not isinstance(relations, list) or not 1 <= len(relations) <= 1000):
+            raise ValidationError('Contrato de relaciones retiradas fuera de límite.')
+        company = self.env.company
+        self._lock_source(company, instance)
+        article_ids = set()
+        keys = set()
+        for row in relations:
+            if (not isinstance(row, dict) or set(row) != {'article_id', 'vendor_code', 'source_checksum'}
+                    or type(row['article_id']) is not int or not 0 < row['article_id'] < 2**31
+                    or not isinstance(row['vendor_code'], str) or not re.fullmatch(r'[0-9A-Za-z]{1,3}', row['vendor_code'])
+                    or not isinstance(row['source_checksum'], str) or not re.fullmatch(r'[0-9a-f]{64}', row['source_checksum'])):
+                raise ValidationError('Identidad inválida para una relación retirada.')
+            key = (row['article_id'], row['vendor_code'])
+            if key in keys:
+                raise ValidationError('Relación retirada repetida en el lote.')
+            keys.add(key)
+            article_ids.add(row['article_id'])
+        Info = self.env['product.supplierinfo'].sudo()
+        existing = {(row.sga_article_id, row.sga_vendor_code): row for row in Info.search([
+            ('company_id', '=', company.id), ('sga_binding_id.company_id', '=', company.id),
+            ('sga_binding_id.source_instance', '=', instance), ('sga_article_id', 'in', list(article_ids)),
+        ])}
+        archived = Info.browse()
+        for row in relations:
+            record = existing.get((row['article_id'], row['vendor_code']))
+            if record and record.sga_source_checksum != row['source_checksum']:
+                raise ValidationError('Cambió la relación en Odoo después de comprobar su retiro en SGA.')
+            if record and not record.sga_source_missing:
+                archived |= record
+        if archived and not dry_run:
+            archived.write({'sga_source_missing': True})
+        return {'relations': {'missing': len(archived), 'unchanged': len(relations) - len(archived)},
+                'count': len(relations), 'last_key': [relations[-1]['article_id'], relations[-1]['vendor_code']],
+                'dry_run': dry_run, 'sga_writes_enabled': False}
+
     def _apply(self, instance, vendors, relations, dry_run=True):
         if (not isinstance(instance, str) or not 1 <= len(instance) <= 80 or type(dry_run) is not bool
                 or not isinstance(vendors, list) or len(vendors) > 800
                 or not isinstance(relations, list) or len(relations) > 1000):
             raise ValidationError('Contrato de proveedores fuera de límite.')
         company = self.env.company
-        lock = int(digest(['suppliers', company.id, instance])[:15], 16)
-        self.env.cr.execute('SELECT pg_advisory_xact_lock(%s)', [lock])
+        self._lock_source(company, instance)
         Bind = self.env['sga.supplier.binding'].sudo()
         Partner = self.env['res.partner'].sudo().with_context(active_test=False, tracking_disable=True)
         Info = self.env['product.supplierinfo'].sudo()
@@ -180,7 +221,8 @@ class SupplierImport(models.AbstractModel):
                 'product_id': old.product_id.id if old else False, 'company_id': company.id,
                 'sequence': row['priority'], 'product_code': row['product_code'],
                 'disabled': row['disabled'], 'vendor_active': row['vendor_active']}
-            unchanged = old and not adopted and old.sga_source_checksum == checksum and self._snapshot(old) == desired
+            unchanged = (old and not adopted and not old.sga_source_missing
+                         and old.sga_source_checksum == checksum and self._snapshot(old) == desired)
             status = 'unchanged' if unchanged else 'adopted' if adopted else 'updated' if old else 'created'
             counts[status] += 1
             counts['disabled'] += int(row['disabled']); counts['inactive_vendor'] += int(not row['vendor_active'])
@@ -189,7 +231,7 @@ class SupplierImport(models.AbstractModel):
                 continue
             values = {'sga_binding_id': binding.id, 'sga_article_id': row['article_id'],
                 'sequence': row['priority'], 'product_code': row['product_code'] or False,
-                'sga_disabled': row['disabled'], 'sga_vendor_active': row['vendor_active'],
+                'sga_disabled': row['disabled'], 'sga_vendor_active': row['vendor_active'], 'sga_source_missing': False,
                 'sga_source_checksum': checksum, 'sga_target_checksum': digest(desired), 'sga_source_snapshot': row}
             if old:
                 if adopted:

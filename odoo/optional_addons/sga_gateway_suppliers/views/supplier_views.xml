@@ -5,7 +5,7 @@
     <field name="arch" type="xml">
       <field name="sequence" position="after"><field name="sequence" string="Prioridad" optional="show"/><field name="sga_vendor_code" optional="show"/></field>
       <field name="product_code" position="attributes"><attribute name="optional">show</attribute></field>
-      <field name="product_code" position="after"><field name="sga_price_pending" optional="show"/><field name="sga_disabled" optional="hide"/><field name="sga_vendor_active" optional="hide"/></field>
+      <field name="product_code" position="after"><field name="sga_price_pending" optional="show"/><field name="sga_disabled" optional="hide"/><field name="sga_source_missing" optional="hide"/><field name="sga_vendor_active" optional="hide"/></field>
     </field>
   </record>
   <record id="supplier_form" model="ir.ui.view">
@@ -14,7 +14,7 @@
     <field name="arch" type="xml"><xpath expr="//sheet" position="inside">
       <group string="Relación de SGA" invisible="not sga_binding_id">
         <field name="sga_binding_id"/><field name="sga_article_id"/><field name="sga_vendor_code"/>
-        <field name="sequence" string="Prioridad (menor = preferido)"/><field name="sga_disabled"/><field name="sga_vendor_active"/><field name="sga_price_pending"/>
+        <field name="sequence" string="Prioridad (menor = preferido)"/><field name="sga_disabled"/><field name="sga_source_missing"/><field name="sga_vendor_active"/><field name="sga_price_pending"/>
         <div class="text-muted" colspan="2">Los empates mantienen la misma prioridad. Las cotizaciones de SGA están pendientes de revisión; el precio cero no se utiliza en la selección automática.</div>
       </group>
     </xpath></field>

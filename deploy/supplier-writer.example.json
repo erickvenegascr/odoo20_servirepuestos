@@ -1,0 +1,14 @@
+{
+  "enabled": false,
+  "application_id": "00000000-0000-0000-0000-000000000001",
+  "source_instance": "replace-with-verified-source",
+  "host": "127.0.0.1",
+  "port": 3306,
+  "database": "sgadata",
+  "unix_socket": "/var/lib/mysql/mysql.sock",
+  "integration_schema": "sga_supplier_integration",
+  "user": "sgagw_supplier_updates",
+  "password": "",
+  "audit_user": "ODOO",
+  "audit_station": 4
+}

@@ -5,6 +5,7 @@ from bridge.catalog_client import CatalogOdoo
 from bridge.services_exchange import exchange_once
 from bridge.article_exchange import configured_writer, sweep_once
 from bridge.purchase_exchange import configured_purchase_bridge
+from bridge.supplier_exchange import configured_supplier_writer
 
 
 class Command(BaseCommand):
@@ -18,10 +19,11 @@ class Command(BaseCommand):
         client = CatalogOdoo(configuration('ODOO_CATALOG_TARGET'))
         writer = configured_writer(client)
         purchase = configured_purchase_bridge(client)
+        supplier = configured_supplier_writer(client)
         try:
             while True:
                 try:
-                    count = exchange_once(client, writer, purchase)
+                    count = exchange_once(client, writer, purchase, supplier_writer=supplier)
                     if writer is not None and writer.config.get('read_sweep_enabled',True):
                         sweep_once(client, writer)
                     if count:

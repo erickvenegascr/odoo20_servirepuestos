@@ -1,14 +1,20 @@
 import hashlib
 import json
+import logging
 import uuid
 
 from django.utils import timezone
+from pymysql.err import MySQLError
 from bridge.models import GatewayInbox
 from bridge.article_contract import ArticleError
 from bridge.purchase_exchange import ACTIONS as PURCHASE_ACTIONS
+from bridge.supplier_update_contract import ACTION as SUPPLIER_UPDATE, SupplierResultUnverified
 
 
-def exchange_once(client, article_writer=None, purchase_bridge=None):
+_logger = logging.getLogger(__name__)
+
+
+def exchange_once(client, article_writer=None, purchase_bridge=None, *, supplier_writer=None):
     envelope = client.call('poll')
     application = uuid.UUID(envelope['application_id'])
     expected = client.config.get('application_id') if isinstance(getattr(client, 'config', None), dict) else None
@@ -27,6 +33,8 @@ def exchange_once(client, article_writer=None, purchase_bridge=None):
             article = message['kind'] == 'request' and isinstance(payload, dict) and payload.get('action') in ('article.create','article.update','article.initialize')
             purchase = (message['kind'] == 'request' and isinstance(payload, dict)
                         and payload.get('action') in PURCHASE_ACTIONS)
+            supplier_update = (message['kind'] == 'request' and isinstance(payload, dict)
+                               and payload.get('action') == SUPPLIER_UPDATE)
             if article:
                 # Disabled adapters leave the original message pending for its
                 # next lease; a read-only inbox result must not poison retries.
@@ -41,6 +49,22 @@ def exchange_once(client, article_writer=None, purchase_bridge=None):
                         raise
                     result = {'status':'rejected','code':exc.code,'operation_id':str(message_id),
                               'product_uuid':payload.get('product_uuid')}
+            elif supplier_update:
+                if supplier_writer is None:
+                    continue
+                if (str(application) != supplier_writer.application_id
+                        or payload.get('operation_id') != str(message_id)):
+                    raise ValueError('Supplier operation/application identity mismatch')
+                try:
+                    result = supplier_writer.apply(payload)
+                except (SupplierResultUnverified, MySQLError, OSError) as exc:
+                    # The next lease must reuse this UUID. Keep processing unrelated messages.
+                    _logger.warning('Supplier update %s deferred (%s)', message_id, type(exc).__name__)
+                    continue
+                if result.get('status') == 'unavailable':
+                    client.call('ack', message_id=str(message_id), lease=message['lease'], result=result)
+                    count += 1
+                    continue
             elif purchase:
                 if purchase_bridge is None:
                     continue
