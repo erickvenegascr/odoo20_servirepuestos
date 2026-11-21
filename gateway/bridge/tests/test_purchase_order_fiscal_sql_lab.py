@@ -20,15 +20,25 @@ from bridge.purchase_receipt_sql import (
     JOURNAL_TABLE, READ_TABLES as RECEIPT_READ_TABLES, WRITE_COLUMNS as RECEIPT_WRITE_COLUMNS, PurchaseReceiptSql,
 )
 from bridge.purchase_valuation_snapshot import PurchaseValuationSnapshot, compare_purchase_valuation
+from bridge.tests.test_purchase_credit_receipt import liquid_credit_discount
 
 
 SOCKET = os.environ.get('SGA_FISCAL_ORDER_LAB_SOCKET')
 FIXTURE = os.environ.get('SGA_FISCAL_ORDER_LAB_REQUEST')
+DISCOUNT_CASE = os.environ.get('SGA_FISCAL_DISCOUNT_LAB') == '1'
 
 
 @unittest.skipUnless(SOCKET and FIXTURE, 'Isolated fiscal order laboratory was not selected')
 class FiscalPurchaseOrderLabTests(unittest.TestCase):
+    @unittest.skipIf(DISCOUNT_CASE, 'Isolated fixture selected for XML discount')
     def test_new_wholesale_order_receives_invoice_and_increments_supplier_debt_once(self):
+        self._exercise_receipt(liquid_discount=False)
+
+    @unittest.skipUnless(DISCOUNT_CASE, 'A fresh isolated XML discount fixture was not selected')
+    def test_wholesale_xml_discount_writes_liquid_cost_and_credit_once(self):
+        self._exercise_receipt(liquid_discount=True)
+
+    def _exercise_receipt(self, *, liquid_discount):
         database = 'sgadata_lab'
         admin = pymysql.connect(unix_socket=SOCKET, user='root', database=database, charset='latin1',
                                 cursorclass=pymysql.cursors.DictCursor, autocommit=True)
@@ -40,10 +50,16 @@ class FiscalPurchaseOrderLabTests(unittest.TestCase):
         receipt = fixture.get('payload', fixture)['receipt']
         receipt.update(invoice_key='50621112600310149566000100001010000005767199999999',
                        invoice_number='00100001010000005767', document_id=456)
+        if liquid_discount:
+            receipt['lines'] = sorted(receipt['lines'], key=lambda row: row['article_id'])[:2]
+            self.assertEqual(2, len(receipt['lines']))
+            liquid_credit_discount(receipt)
+        expected_quantity = 4 if liquid_discount else 33
+        expected_total = Decimal('30103.20') if liquid_discount else Decimal('72125.64')
         vendor = receipt['vendor_code']
         articles = sorted(line['article_id'] for line in receipt['lines'])
         quantities = {line['article_id']: int(line['quantity']) for line in receipt['lines']}
-        self.assertEqual(33, sum(quantities.values()))
+        self.assertEqual(expected_quantity, sum(quantities.values()))
         order_columns = {key: columns | {'CantPedida'} if key in (
             ('UPDATE', 'artsservs'), ('UPDATE', 'articulosproveedor')) else columns
             for key, columns in WRITE_COLUMNS.items()}
@@ -116,12 +132,12 @@ class FiscalPurchaseOrderLabTests(unittest.TestCase):
         proof.connection = admin
         before = proof.capture(receipt_payload)
         self.assertEqual('not_found', before['receipt_verification']['status'])
-        self.assertEqual(33, sum(row['remaining'] for row in before['lines']))
+        self.assertEqual(expected_quantity, sum(row['remaining'] for row in before['lines']))
         result = receipt_writer.apply(receipt_payload)
         self.assertEqual('synchronized', result['status'], result)
         self.assertEqual([counters['Recibo'] + 1], result['receipt_ids'])
-        self.assertEqual(33, sum(row['quantity_base'] for row in result['lines']))
-        self.assertEqual(72125.64, result['payable']['amount_total'])
+        self.assertEqual(expected_quantity, sum(row['quantity_base'] for row in result['lines']))
+        self.assertEqual(expected_total, Decimal(str(result['payable']['amount_total'])))
         self.assertEqual(result, receipt_writer.apply(receipt_payload))
         duplicate_receipt = {**receipt_payload, 'operation_id': str(uuid4())}
         self.assertEqual('SGA_RECEIPT_INVOICE_ALREADY_PRESENT', receipt_writer.apply(duplicate_receipt)['code'])
@@ -139,17 +155,42 @@ class FiscalPurchaseOrderLabTests(unittest.TestCase):
             time.sleep(1.05)
             after = proof.capture(receipt_payload)
         comparison = compare_purchase_valuation(receipt_payload, before, after)
-        self.assertEqual(('matched', 33, 0), (comparison['status'], comparison['remaining_before'],
+        self.assertEqual(('matched', expected_quantity, 0), (comparison['status'], comparison['remaining_before'],
                                             comparison['remaining_after']), comparison)
         with admin.cursor() as cursor:
             self.assertEqual(before_pending, {article: self.pending_stock(cursor, article, vendor)
                                               for article in articles})
-            self.assertEqual(before_debt + Decimal('72125.64'), self.supplier_debt(cursor, vendor))
+            self.assertEqual(before_debt + expected_total, self.supplier_debt(cursor, vendor))
             cursor.execute('SELECT Pedido,Recibo FROM pgconsecutivos WHERE Llave=0')
             self.assertEqual({'Pedido': order_no, 'Recibo': counters['Recibo'] + 1}, cursor.fetchone())
+            if liquid_discount:
+                self._verify_liquid_discount(cursor, result['receipt_ids'][0], receipt, articles)
             for schema, table in ((order_journal, FISCAL_ORDER_TABLE), (receipt_journal, JOURNAL_TABLE)):
                 cursor.execute(f'SELECT COUNT(*) AS total FROM `{schema}`.`{table}`')
                 self.assertEqual(1, cursor.fetchone()['total'])
+
+    def _verify_liquid_discount(self, cursor, number, receipt, articles):
+        cursor.execute('SELECT Descuento,MontoImptoVenta FROM recibos WHERE Recibo=%s', (number,))
+        self.assertEqual({'Descuento': 0.0, 'MontoImptoVenta': 3463.20}, cursor.fetchone())
+        cursor.execute('SELECT Articulo,CantRecibida,CostoUnit,CostoUnitCIF,TipoIVA,IVA FROM recibosart '
+                       'WHERE Recibo=%s ORDER BY Articulo', (number,))
+        rows = cursor.fetchall()
+        expected = [{'Articulo': article, 'CantRecibida': 2, 'CostoUnit': 6660.0, 'CostoUnitCIF': 6660.0,
+                     'TipoIVA': '08', 'IVA': 0.13} for article in articles]
+        self.assertEqual(expected, rows)
+        self.assertEqual(Decimal('26640'), sum(row['CantRecibida'] * Decimal(str(row['CostoUnit'])) for row in rows))
+        cursor.execute('SELECT h.MontoDeudaReal,h.Cerrada+0 AS Cerrada,d.Monto,d.MontoImptoVenta,d.TipoCredito, '
+                       'DATE(DATE_ADD(d.Fecha,INTERVAL d.TipoCredito DAY)) AS Vence '
+                       'FROM cuentaspagar h JOIN cuentaspagardet d ON (d.Proveedor=h.Proveedor '
+                       'AND d.FacturaPrimaria=h.FacturaPrimaria) WHERE h.Proveedor=%s AND h.FacturaPrimaria=%s',
+                       (receipt['vendor_code'], receipt['invoice_number']))
+        payable = cursor.fetchall()
+        self.assertEqual(1, len(payable))
+        row = payable[0]
+        self.assertEqual((30103.20, 0, 30103.20, 3463.20, 30), tuple(row[key] for key in (
+            'MontoDeudaReal', 'Cerrada', 'Monto', 'MontoImptoVenta', 'TipoCredito')))
+        self.assertEqual(receipt['fiscal']['payment_terms']['due_date'], row['Vence'].isoformat())
+        print(f'LIQUID_DISCOUNT_LAB receipt={number} quantity=4 net=26640 iva=3463.20 payable=30103.20 credit=30')
 
     def prepare_writer(self, admin, schema, database, files, original, read_tables, write_columns, journals):
         writer_user, password = 'bulk_' + uuid4().hex[:8], uuid4().hex

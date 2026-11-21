@@ -1,9 +1,10 @@
 """Compare a regular IVA credit purchase with its native receipt and payable."""
 
 from datetime import date, timedelta
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from xml.etree import ElementTree
 
-from .purchase_effects_contract import PurchaseEffectsError, request
+from .purchase_effects_contract import MONEY_TOLERANCE, PurchaseEffectsError, request
 from .purchase_receipt_source import RECEIPT_TABLES, SCOPE_FIELDS, PurchaseReceiptSource
 from .purchase_source import _bit, _digest, _iso, _money
 
@@ -95,7 +96,7 @@ def _regular_credit(fiscal):
         return False
     for line in fiscal['lines']:
         taxes = line['taxes']
-        if (line['inventory_effect'] != 'receive' or line['discounts'] or line['promotion']['type'] is not None
+        if (line['inventory_effect'] != 'receive' or line['promotion']['type'] is not None
                 or line['assumed_tax_amount'] or len(taxes) != 1):
             return False
         tax = taxes[0]
@@ -103,7 +104,39 @@ def _regular_credit(fiscal):
                 tax[key] for key in ('exoneration_amount', 'exoneration_percentage', 'exoneration_xml',
                                      'included_in_cost')):
             return False
+        if line['discounts'] and not _liquid_line_discount(line, tax):
+            return False
     return True
+
+
+def _liquid_line_discount(line, tax):
+    discounts = line['discounts']
+    if len(discounts) != 1 or discounts[0]['code'] != '07':
+        return False
+    discount = discounts[0]
+    amount = Decimal(str(discount['amount']))
+    gross = Decimal(str(line['gross_amount']))
+    net = Decimal(str(line['net_amount']))
+    if not 0 < amount < gross or net <= 0 or abs(gross - amount - net) > MONEY_TOLERANCE:
+        return False
+    # request() checks XML structure and rejects DTD/entities before this check.
+    element = ElementTree.fromstring(discount['source_xml'])
+    fields = {'CodigoDescuento': [], 'MontoDescuento': []}
+    for child in element:
+        name = child.tag.rsplit('}', 1)[-1]
+        if name in fields:
+            fields[name].append((child.text or '').strip())
+    if fields['CodigoDescuento'] != ['07'] or len(fields['MontoDescuento']) != 1:
+        return False
+    try:
+        xml_amount = Decimal(fields['MontoDescuento'][0])
+    except InvalidOperation:
+        return False
+    # The certified native profile writes the liquid amount into the detail
+    # and leaves the receipt's separate header discount at its zero default.
+    return (xml_amount.is_finite() and xml_amount == amount
+            and Decimal(str(tax['base_amount'])) == net
+            and abs(Decimal(str(tax['amount'])) - net * Decimal('.13')) <= MONEY_TOLERANCE)
 
 
 def _lines_match(expected, actual):
