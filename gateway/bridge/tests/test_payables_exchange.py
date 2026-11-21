@@ -1,9 +1,11 @@
 import json
 import sqlite3
+from unittest.mock import Mock
 from uuid import uuid4
 
 from django.test import TestCase
 
+from bridge.catalog_client import CatalogRemoteError
 from bridge.models import PayablesInbox
 from bridge.payables_exchange import _digest, exchange_once, receive, record_readback
 
@@ -113,6 +115,70 @@ class ExchangeTests(TestCase):
         exchange_once(odoo, self.app, self.instance, adapter=self.ledger)
         self.assertEqual(self.ledger.balance(self.key), 10000)
         self.assertEqual(PayablesInbox.objects.count(), 2)
+
+    def test_replays_persisted_ack_when_odoo_committed_before_losing_response(self):
+        self.ledger.put(self.key, "USD", 10000)
+        delivery = self.delivery()
+        adapter = Mock(wraps=self.ledger)
+        committed = []
+
+        def call(method, **kwargs):
+            if method == "payables_poll":
+                return {"events": [] if committed else [delivery]}
+            self.assertEqual(method, "payables_ack")
+            if not committed:
+                committed.append(kwargs)
+                raise ConnectionError
+            self.assertEqual(kwargs, committed[0])
+            self.assertEqual(kwargs["lease"], delivery["lease"])
+            return {"operation_id": kwargs["operation_id"], "state": kwargs["result"]["state"]}
+
+        odoo = Mock()
+        odoo.call.side_effect = call
+        with self.assertRaises(ConnectionError):
+            exchange_once(odoo, self.app, self.instance, adapter=adapter)
+        pending = PayablesInbox.objects.get(application_id=self.app)
+        self.assertEqual(pending.result, committed[0]["result"])
+        self.assertIsNone(pending.acknowledged_at)
+
+        self.assertEqual(exchange_once(odoo, self.app, self.instance, adapter=adapter),
+                         {"received": 0, "awaiting_native": 0, "acknowledged": 1})
+        pending.refresh_from_db()
+        self.assertIsNotNone(pending.acknowledged_at)
+        self.assertEqual(self.ledger.balance(self.key), 7500)
+        adapter.apply_and_readback.assert_called_once()
+
+        odoo.call.reset_mock()
+        self.assertEqual(exchange_once(odoo, self.app, self.instance, adapter=adapter)["acknowledged"], 0)
+        odoo.call.assert_called_once_with("payables_poll", instance=self.instance)
+
+    def test_expired_persisted_ack_waits_for_replacement_lease(self):
+        self.ledger.put(self.key, "USD", 10000)
+        delivery = self.delivery()
+        pending = receive(self.app, self.instance, delivery)
+        original_result = self.ledger.apply_and_readback(delivery["payload"], delivery["payload_hash"])
+        record_readback(self.app, pending.operation_id, original_result)
+
+        odoo = Mock()
+        odoo.call.side_effect = [{"events": []}, CatalogRemoteError("ODOO_CATALOG_HTTP_409")]
+        self.assertEqual(exchange_once(odoo, self.app, self.instance)["acknowledged"], 0)
+        pending.refresh_from_db()
+        self.assertEqual(str(pending.lease), delivery["lease"])
+        self.assertIsNone(pending.acknowledged_at)
+
+        replacement = {**delivery, "lease": str(uuid4())}
+        odoo.call.side_effect = [
+            {"events": [replacement]}, {"operation_id": delivery["operation_id"], "state": "confirmed"},
+        ]
+        adapter = Mock(wraps=self.ledger)
+        self.assertEqual(exchange_once(odoo, self.app, self.instance, adapter=adapter)["acknowledged"], 1)
+        odoo.call.assert_called_with("payables_ack", instance=self.instance, operation_id=delivery["operation_id"],
+                                     lease=replacement["lease"], result=original_result)
+        pending.refresh_from_db()
+        self.assertEqual(str(pending.lease), replacement["lease"])
+        self.assertIsNotNone(pending.acknowledged_at)
+        self.assertEqual(self.ledger.balance(self.key), 7500)
+        adapter.apply_and_readback.assert_not_called()
 
     def test_stale_balance_or_currency_keeps_native_balance(self):
         self.ledger.put(self.key, "CRC", 10000)

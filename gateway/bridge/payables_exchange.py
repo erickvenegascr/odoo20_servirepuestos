@@ -10,6 +10,7 @@ from uuid import UUID
 from django.db import transaction
 from django.utils import timezone
 
+from .catalog_client import CatalogRemoteError
 from .models import PayablesInbox
 
 
@@ -137,6 +138,16 @@ def record_readback(application_id, operation_id, result):
         return row
 
 
+def _acknowledge(client, row):
+    response = client.call(
+        "payables_ack", instance=row.source_instance, operation_id=str(row.operation_id),
+        lease=str(row.lease), result=row.result,
+    )
+    if response != {"operation_id": str(row.operation_id), "state": row.result["state"]}:
+        raise ValueError("PAYABLES_ACK_INVALID")
+    return PayablesInbox.objects.filter(pk=row.pk, lease=row.lease).update(acknowledged_at=timezone.now())
+
+
 def exchange_once(client, application_id, instance, *, adapter=None):
     envelope = client.call("payables_poll", instance=instance)
     if (not isinstance(envelope, dict) or set(envelope) != {"events"}
@@ -154,12 +165,20 @@ def exchange_once(client, application_id, instance, *, adapter=None):
         if row.result is None:
             counts["awaiting_native"] += 1
             continue
-        response = client.call(
-            "payables_ack", instance=instance, operation_id=str(row.operation_id),
-            lease=str(row.lease), result=row.result,
-        )
-        if response != {"operation_id": str(row.operation_id), "state": row.result["state"]}:
-            raise ValueError("PAYABLES_ACK_INVALID")
-        PayablesInbox.objects.filter(pk=row.pk, lease=row.lease).update(acknowledged_at=timezone.now())
-        counts["acknowledged"] += 1
+        counts["acknowledged"] += _acknowledge(client, row)
+
+    # Terminal events no longer appear in poll if Odoo saved the ack but its
+    # response was lost. Try the stored receipt with the stored lease; by
+    # polling first we already used any replacement lease in this delivery.
+    unacknowledged = PayablesInbox.objects.filter(
+        application_id=application_id, source_instance=instance,
+        result__isnull=False, acknowledged_at__isnull=True,
+    ).order_by("pk")
+    for row in unacknowledged:
+        try:
+            counts["acknowledged"] += _acknowledge(client, row)
+        except CatalogRemoteError as error:
+            if error.code != "ODOO_CATALOG_HTTP_409":
+                raise
+            # An expired or replaced lease may be offered by a later poll.
     return counts
