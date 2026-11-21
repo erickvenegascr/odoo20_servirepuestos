@@ -7,6 +7,7 @@ from django.utils import timezone
 from pymysql.err import MySQLError
 from bridge.models import GatewayInbox
 from bridge.article_contract import ArticleError
+from bridge.purchase_effects_contract import NativeResultUnknown, NativeResultUnverified
 from bridge.purchase_exchange import ACTIONS as PURCHASE_ACTIONS
 from bridge.supplier_update_contract import ACTION as SUPPLIER_UPDATE, SupplierResultUnverified
 
@@ -71,7 +72,13 @@ def exchange_once(client, article_writer=None, purchase_bridge=None, *, supplier
                 if (str(application) != purchase_bridge.application_id
                         or payload.get('operation_id') != str(message_id)):
                     raise ValueError('Purchase operation/application identity mismatch')
-                result = purchase_bridge.apply(payload)
+                try:
+                    result = purchase_bridge.apply(payload)
+                except (NativeResultUnknown, NativeResultUnverified, MySQLError, OSError) as exc:
+                    if payload.get('action') != 'price.publish':
+                        raise
+                    _logger.warning('Retail price publication %s deferred (%s)', message_id, type(exc).__name__)
+                    continue
                 if result.get('status') in ('blocked', 'unavailable'):
                     # Deliver the reason to the user without making a temporary
                     # capability block or read outage a permanent native receipt.

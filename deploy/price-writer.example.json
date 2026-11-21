@@ -1,0 +1,15 @@
+{
+  "enabled": false,
+  "application_id": "00000000-0000-0000-0000-000000000001",
+  "source_instance": "replace-with-verified-source",
+  "host": "127.0.0.1",
+  "port": 3306,
+  "database": "sgadata",
+  "integration_schema": "sga_retail_price_integration",
+  "user": "sgagw_price",
+  "password": "",
+  "audit_user": "ODOOPR",
+  "audit_station": 4,
+  "profile": "crc_normal_fixed_margin_retail",
+  "evidence_reference": ""
+}

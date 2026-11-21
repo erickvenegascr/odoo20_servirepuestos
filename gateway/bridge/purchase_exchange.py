@@ -5,6 +5,7 @@ explicitly unavailable until a native executor has been independently certified;
 loading this bridge does not grant business-table write privileges.
 """
 import json
+import logging
 import os
 import uuid
 from pathlib import Path
@@ -20,11 +21,13 @@ from .purchase_effects_contract import (
 )
 from .purchase_order_contract import validate_order_request, validate_order_result
 from .purchase_order_sql import PurchaseOrderSql
+from .purchase_price_source import PurchasePriceSource, valid_scope as valid_price_scope
 
 
 ACTIONS = frozenset({'purchase.search', 'purchase.discover', 'purchase.receipt.lookup', 'purchase.upsert',
-                     'purchase.receive', 'purchase.reverse', 'purchase.replenish', 'price.publish'})
+                     'purchase.receive', 'purchase.reverse', 'purchase.replenish', 'price.lookup', 'price.publish'})
 MAX_RESULT_BYTES = 240000  # Odoo exchange/ack caps the whole request at 262144.
+_logger = logging.getLogger(__name__)
 
 
 def _bounded_result(result, common):
@@ -48,7 +51,8 @@ def _bounded_result(result, common):
 class PurchaseBridge:
     def __init__(self, application_id, source_config, *, source_factory=PurchaseSource,
                  replenishment_factory=PurchaseReplenishmentSource, receipt_factory=PurchaseReceiptSource,
-                 effects=None, order_writer=None, receipt_writer=None):
+                 price_factory=PurchasePriceSource, effects=None, order_writer=None, receipt_writer=None,
+                 price_writer=None):
         self.application_id = str(uuid.UUID(application_id))
         self.source_instance = source_config.get('instance') or source_config.get('source_instance')
         if (not isinstance(self.source_instance, str) or not self.source_instance
@@ -58,6 +62,7 @@ class PurchaseBridge:
         self.source_factory = source_factory
         self.replenishment_factory = replenishment_factory
         self.receipt_factory = receipt_factory
+        self.price_factory = price_factory
         self.order_writer = order_writer
         if order_writer is not None and (order_writer.application_id != self.application_id
                                          or order_writer.source_instance != self.source_instance):
@@ -66,6 +71,10 @@ class PurchaseBridge:
         if receipt_writer is not None and (receipt_writer.application_id != self.application_id
                                            or receipt_writer.source_instance != self.source_instance):
             raise ValueError('Purchase receipt executor scope mismatch')
+        self.price_writer = price_writer
+        if price_writer is not None and (price_writer.application_id != self.application_id
+                                         or price_writer.source_instance != self.source_instance):
+            raise ValueError('Retail price executor scope mismatch')
         self.effects = effects or NativeEffectsBoundary(self.application_id, self.source_instance)
         if (self.effects.application_id != self.application_id
                 or self.effects.source_instance != self.source_instance):
@@ -76,7 +85,7 @@ class PurchaseBridge:
                 or payload['contract'] not in (1, 2)
                 or not isinstance(payload.get('action'), str) or payload['action'] not in ACTIONS
                 or payload['contract'] == 2 and payload['action'] not in
-                ('purchase.upsert', 'purchase.receive', 'price.publish')
+                ('purchase.upsert', 'purchase.receive', 'price.publish', 'price.lookup')
                 or payload.get('application_id') != self.application_id
                 or payload.get('source_instance') != self.source_instance):
             raise ValueError('Purchase operation/source scope mismatch')
@@ -92,6 +101,8 @@ class PurchaseBridge:
             return self._discover(payload, common)
         if action == 'purchase.receipt.lookup':
             return self._lookup_receipt(payload, common)
+        if action == 'price.lookup':
+            return self._lookup_price(payload, common)
         if action == 'purchase.replenish':
             if (set(payload) - (COMMON | {'scope', 'limit', 'after'})
                     or not COMMON | {'scope', 'limit'} <= set(payload)
@@ -131,6 +142,8 @@ class PurchaseBridge:
             try:
                 if action == 'purchase.receive' and self.receipt_writer is not None:
                     return self.receipt_writer.apply(payload)
+                if action == 'price.publish' and self.price_writer is not None:
+                    return self.price_writer.apply(payload)
                 return self.effects.apply(payload)
             except NativeResultUnverified:
                 # Could follow a native commit. Retain the original operation
@@ -190,6 +203,17 @@ class PurchaseBridge:
             return {**common, 'scope': scope, 'status': 'conflict', 'code': 'SGA_RECEIPT_LOOKUP_TOO_BROAD'}
         return response
 
+    def _lookup_price(self, payload, common):
+        scope = payload.get('scope')
+        if (payload['contract'] != 2 or set(payload) != COMMON | {'scope'} or not valid_price_scope(scope)):
+            return {**common, 'status': 'rejected', 'code': 'INVALID_NATIVE_PRICE_LOOKUP_SCOPE'}
+        try:
+            with self.price_factory(self.source_config) as source:
+                rows = source.lookup(**scope, profile=self.price_writer.profile if self.price_writer else None)
+        except (ArithmeticError, ValueError, MySQLError, OSError):
+            return {**common, 'scope': scope, 'status': 'unavailable', 'code': 'SGA_PRICE_LOOKUP_UNAVAILABLE'}
+        return {**common, 'scope': scope, 'status': 'found', 'prices': rows}
+
 
 def configured_purchase_bridge(client):
     if not os.environ.get('SGA_PURCHASE_BRIDGE_FILE'):
@@ -228,4 +252,20 @@ def configured_purchase_bridge(client):
             from .purchase_receipt_sql import PurchaseReceiptSql
 
             receipt_writer = PurchaseReceiptSql(receipt_config, source, application)
-    return PurchaseBridge(application, source, order_writer=order_writer, receipt_writer=receipt_writer)
+    price_writer = None
+    price_path = config.get('price_writer_file')
+    if price_path:
+        try:
+            if not isinstance(price_path, str) or not Path(price_path).is_absolute():
+                raise ValueError('Retail price writer requires an absolute configuration path')
+            price_config = json.loads(Path(price_path).read_text())
+            if not isinstance(price_config, dict):
+                raise ValueError('Invalid retail price writer configuration')
+            if price_config.get('enabled') is True:
+                from .purchase_price_sql import PurchasePriceSql
+
+                price_writer = PurchasePriceSql(price_config, source, application)
+        except (ValueError, OSError) as exc:
+            _logger.warning('Retail price writer disabled (%s)', type(exc).__name__)
+    return PurchaseBridge(application, source, order_writer=order_writer, receipt_writer=receipt_writer,
+                          price_writer=price_writer)
