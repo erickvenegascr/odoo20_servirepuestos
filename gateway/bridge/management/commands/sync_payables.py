@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import os
+from collections import Counter
 from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
@@ -10,6 +12,8 @@ from django.db import connection
 from bridge.catalog_client import CatalogOdoo
 from bridge.catalog_source import configuration
 from bridge.payables_source import MAX_BATCH, PayablesSource, document_key
+from bridge.payables_supplier_review import supplier_advisories
+from bridge.supplier_embeddings import OpenAISupplierEmbedder, SupplierEmbeddingUnavailable
 
 
 def _tracked_keys(path):
@@ -27,6 +31,8 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--apply", action="store_true")
         parser.add_argument("--batch-size", type=int, default=MAX_BATCH)
+        parser.add_argument("--suppliers-only", action="store_true", help="Sincronizar únicamente maestros de proveedores.")
+        parser.add_argument("--supplier-embeddings", action="store_true", help="Comparar nombres mediante OpenAI.")
         parser.add_argument(
             "--document-key-file",
             help="Private JSON array of previously tracked SGA keys to re-read, including closures.",
@@ -36,6 +42,10 @@ class Command(BaseCommand):
         size = options["batch_size"]
         if not 1 <= size <= MAX_BATCH:
             raise CommandError(f"Batch size must be in 1..{MAX_BATCH}")
+        suppliers_only = options.get("suppliers_only", False)
+        use_embeddings = options.get("supplier_embeddings", False)
+        if suppliers_only and options["document_key_file"]:
+            raise CommandError("Un lote solo de proveedores no admite claves de facturas")
         try:
             source_config = configuration("SGA_PAYABLES_SOURCE")
             target = configuration("ODOO_PAYABLES_TARGET")
@@ -57,9 +67,19 @@ class Command(BaseCommand):
         lock = int(hashlib.sha256(("payables:" + identity).encode()).hexdigest()[:15], 16)
         locked = False
         client = None
+        embedder = None
         dry_run = not options["apply"]
         counts = {"suppliers": 0, "documents": 0, "quarantined": 0, "missing_tracked": 0}
+        review_counts = Counter()
         try:
+            if use_embeddings:
+                key_file = os.environ.get("SGA_SUPPLIER_OPENAI_API_KEY_FILE")
+                if not key_file:
+                    raise CommandError("Falta configurar el archivo protegido de OpenAI para proveedores")
+                try:
+                    embedder = OpenAISupplierEmbedder.from_key_file(key_file)
+                except SupplierEmbeddingUnavailable:
+                    raise CommandError("No se pudo cargar la credencial de OpenAI para proveedores") from None
             if connection.vendor == "postgresql":
                 with connection.cursor() as cursor:
                     cursor.execute("SELECT pg_try_advisory_lock(%s)", [lock])
@@ -75,7 +95,7 @@ class Command(BaseCommand):
                     or info.get("authentication") != "application_token"):
                 raise CommandError("Odoo payables source, company or application mismatch")
 
-            after_id = 0
+            after_id = None if suppliers_only else 0
             while after_id is not None:
                 page = client.call("payables_keys", instance=instance, after_id=after_id)
                 next_id = page["next_id"]
@@ -87,11 +107,13 @@ class Command(BaseCommand):
                     tracked[document_key(key)] = None
                 after_id = next_id
 
-            def deliver(*, documents=(), suppliers=(), missing_keys=()):
+            def deliver(*, documents=(), suppliers=(), missing_keys=(), advisories=None):
                 payload = {
                     "instance": instance, "documents": list(documents),
                     "suppliers": list(suppliers), "dry_run": dry_run,
                 }
+                if advisories is not None:
+                    payload["supplier_advisories"] = advisories
                 if missing_keys:
                     payload["missing_keys"] = [list(key) for key in missing_keys]
                 ack = client.call("apply_payables_snapshot", **payload)
@@ -109,10 +131,14 @@ class Command(BaseCommand):
             with PayablesSource(source_config) as source:
                 after_supplier = None
                 while suppliers := source.contacts(after=after_supplier, limit=size):
-                    deliver(suppliers=suppliers)
+                    advisories = None
+                    if embedder:
+                        advisories, statuses = supplier_advisories(client, instance, suppliers, embedder)
+                        review_counts.update(statuses)
+                    deliver(suppliers=suppliers, advisories=advisories)
                     after_supplier = suppliers[-1]["code"]
                 after_document = None
-                while documents := source.open_documents(after=after_document, limit=size):
+                while not suppliers_only and (documents := source.open_documents(after=after_document, limit=size)):
                     deliver(documents=documents)
                     for document in documents:
                         tracked.pop(tuple(document["key"]), None)
@@ -134,6 +160,8 @@ class Command(BaseCommand):
         finally:
             if client:
                 client.close()
+            if embedder:
+                embedder.close()
             if locked:
                 with connection.cursor() as cursor:
                     cursor.execute("SELECT pg_advisory_unlock(%s)", [lock])
@@ -143,3 +171,8 @@ class Command(BaseCommand):
             f"{mode} suppliers={counts['suppliers']} documents={counts['documents']} "
             f"quarantined={counts['quarantined']} missing_tracked={counts['missing_tracked']}"
         )
+        if use_embeddings:
+            self.stdout.write(
+                f"OPENAI ranked={review_counts['ranked']} unavailable={review_counts['unavailable']} "
+                f"without_candidates={review_counts['no_candidates']}"
+            )
