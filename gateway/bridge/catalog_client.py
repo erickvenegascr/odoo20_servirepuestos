@@ -11,8 +11,9 @@ class CatalogRemoteError(RuntimeError):
 
 
 class CatalogOdoo:
-    def __init__(self, config):
+    def __init__(self, config, *, timeout=(10, 120)):
         self.config = config
+        self.timeout = timeout
         parsed = urlparse(config['url'])
         if (parsed.scheme != 'https' or not parsed.netloc or parsed.username
                 or parsed.password or parsed.query or parsed.fragment or parsed.path not in ('', '/')):
@@ -30,6 +31,7 @@ class CatalogOdoo:
                   'article_cards': 'articles/cards',
                   'check_images': 'media/check', 'apply_image': 'media/image',
                   'suppliers_info': 'catalog/suppliers/info', 'apply_suppliers_batch': 'catalog/suppliers/batch',
+                  'apply_suppliers_missing': 'catalog/suppliers/missing',
                   'details_info': 'catalog/details/info', 'apply_details_batch': 'catalog/details/batch'}
         if method not in routes:
             raise ValueError('Unsupported application contract method')
@@ -38,7 +40,7 @@ class CatalogOdoo:
             headers={'Authorization': 'Bearer ' + self.token,
                      'X-Odoo-Database': self.config['database']},
             json=kwargs,
-            timeout=(10, 120), allow_redirects=False,
+            timeout=self.timeout, allow_redirects=False,
         )
         if response.status_code != 200:
             # Never include the response body: it may contain business data or secrets.

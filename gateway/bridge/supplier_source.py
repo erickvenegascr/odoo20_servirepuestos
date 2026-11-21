@@ -1,5 +1,13 @@
 """Supplier relationships only. No source quotes or SGA writes."""
+from pymysql.cursors import SSDictCursor
+
 from .catalog_source import CatalogSource, bit, text
+
+
+def supplier_relation(row):
+    return {'article_id': int(row['Articulo']), 'vendor_code': str(row['Proveedor']).strip(),
+            'product_code': text(row['CodigoArticulo']), 'priority': int(row['Prioridad']),
+            'disabled': bit(row['Deshabilitado']), 'vendor_active': bit(row['Activo'])}
 
 
 class SupplierSource(CatalogSource):
@@ -16,6 +24,19 @@ class SupplierSource(CatalogSource):
             'FROM articulosproveedor r JOIN proveedores p ON p.Proveedor=r.Proveedor '
             'WHERE (r.Articulo>%s OR (r.Articulo=%s AND r.Proveedor>%s)) '
             'ORDER BY r.Articulo,r.Proveedor LIMIT %s', (after[0], after[0], after[1], limit))
-        return [{'article_id': int(row['Articulo']), 'vendor_code': str(row['Proveedor']).strip(),
-                 'product_code': text(row['CodigoArticulo']), 'priority': int(row['Prioridad']),
-                 'disabled': bit(row['Deshabilitado']), 'vendor_active': bit(row['Activo'])} for row in rows]
+        return [supplier_relation(row) for row in rows]
+
+    def relation_count(self):
+        return self.rows('SELECT COUNT(*) AS relation_count FROM articulosproveedor')[0]['relation_count']
+
+    def iter_snapshot_relations(self):
+        """Read every primary key, including an orphan so it cannot look like a deletion."""
+        with self.connection.cursor(SSDictCursor) as cursor:
+            cursor.execute('SELECT r.Articulo,r.Proveedor,r.CodigoArticulo,r.Prioridad,r.Deshabilitado,p.Activo '
+                           'FROM articulosproveedor r LEFT JOIN proveedores p ON p.Proveedor=r.Proveedor '
+                           'ORDER BY r.Articulo,r.Proveedor')
+            while rows := cursor.fetchmany(1000):
+                for row in rows:
+                    if row['Activo'] is None:
+                        raise ValueError('SGA_SUPPLIER_SNAPSHOT_ORPHAN')
+                    yield supplier_relation(row)
