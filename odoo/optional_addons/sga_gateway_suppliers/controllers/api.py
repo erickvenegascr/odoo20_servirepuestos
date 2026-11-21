@@ -40,7 +40,11 @@ class SupplierApi(GatewayApi):
                     value = {'suppliers_contract': 1, 'company_id': app.company_id.id,
                              'database': request.env.cr.dbname, 'application_id': app.application_uuid,
                              'source_instance': app.source_instance, 'sga_writes_enabled': False,
-                             'authentication': 'application_token'}
+                             'authentication': 'application_token', 'missing_supported': True}
+                elif action == 'missing':
+                    if set(body) != {'instance', 'relations', 'dry_run'} or body['instance'] != app.source_instance:
+                        return self._json({'error': 'source_scope_mismatch'}, 403)
+                    value = model._flag_missing(app.source_instance, body['relations'], body['dry_run'])
                 else:
                     if set(body) != {'instance', 'vendors', 'relations', 'dry_run'} or body['instance'] != app.source_instance:
                         return self._json({'error': 'source_scope_mismatch'}, 403)
@@ -68,3 +72,8 @@ class SupplierApi(GatewayApi):
                 csrf=False, save_session=False, max_content_length=MAX_BODY)
     def suppliers_batch(self):
         return self._suppliers('batch')
+
+    @http.route('/sga_gateway/api/v1/catalog/suppliers/missing', type='http', auth='public', methods=['POST'],
+                csrf=False, save_session=False, max_content_length=MAX_BODY)
+    def suppliers_missing(self):
+        return self._suppliers('missing')

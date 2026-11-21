@@ -97,6 +97,37 @@ class SupplierContractCase(TransactionCase):
         self.assertEqual(len(self.rows()), 1)
         self.assertFalse(self.product.product_variant_id._select_seller(partner_id=self.rows().partner_id, quantity=1))
 
+    def test_confirmed_source_removal_suspends_and_reappearance_restores_same_relation(self):
+        snapshot = self.relation(priority=1)
+        self.apply([snapshot])
+        record = self.rows()
+        record.price = 100
+        previous = record.sga_source_checksum
+        missing = [{'article_id': 8, 'vendor_code': '019', 'source_checksum': previous}]
+        preview = self.service._flag_missing(self.instance, missing)
+        self.assertEqual(preview['relations']['missing'], 1)
+        self.assertFalse(record.sga_source_missing)
+        result = self.service._flag_missing(self.instance, missing, dry_run=False)
+        self.assertEqual(result['relations']['missing'], 1)
+        self.assertTrue(record.sga_source_missing)
+        self.assertEqual(record.sga_source_snapshot, snapshot)
+        self.assertEqual(record.sga_source_checksum, previous)
+        self.assertFalse(self.product.product_variant_id._select_seller(partner_id=record.partner_id, quantity=1))
+        self.assertEqual(self.service._flag_missing(self.instance, missing, dry_run=False)['relations']['unchanged'], 1)
+        self.assertEqual(self.apply([snapshot], vendors=[])['relations']['updated'], 1)
+        self.assertEqual(self.rows(), record)
+        self.assertFalse(record.sga_source_missing)
+        self.assertEqual(record.price, 100)
+
+    def test_delayed_removal_cannot_disable_a_newer_source_revision(self):
+        self.apply([self.relation()])
+        record = self.rows()
+        missing = [{'article_id': 8, 'vendor_code': '019', 'source_checksum': record.sga_source_checksum}]
+        self.apply([self.relation(product_code='NEW')], vendors=[])
+        with self.assertRaises(ValidationError):
+            self.service._flag_missing(self.instance, missing, dry_run=False)
+        self.assertFalse(record.sga_source_missing)
+
 
 from odoo.tests import HttpCase
 import hashlib
@@ -123,6 +154,10 @@ class SupplierHttpCase(HttpCase):
         self.assertEqual(result.status_code, 200)
         self.assertEqual(result.json()['suppliers_contract'], 1)
         self.assertFalse(result.json()['sga_writes_enabled'])
+        self.assertTrue(result.json()['missing_supported'])
+        self.assertEqual(self.post('missing', {'instance': 'other', 'relations': [], 'dry_run': False}).status_code, 403)
+        self.assertEqual(self.post('missing', {'instance': self.app.source_instance, 'relations': [{'id': 1}],
+                                              'dry_run': False}).status_code, 409)
         self.assertEqual(self.post('batch', {'instance': 'other', 'vendors': [], 'relations': [], 'dry_run': False}).status_code, 403)
         self.assertEqual(self.post('batch', {'instance': self.app.source_instance, 'vendors': [], 'relations': [],
                                           'dry_run': False, 'model': 'res.users'}).status_code, 403)
