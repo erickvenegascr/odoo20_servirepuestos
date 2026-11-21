@@ -164,3 +164,22 @@ class SupplierPullEntry(models.Model):
                                                name='supplier_pull_unique_identity')]
         indexes = [models.Index(fields=['state', 'bucket'], name='supplier_pull_entry_bucket'),
                    models.Index(fields=['state', 'next_attempt_at'], name='supplier_pull_entry_due')]
+
+
+class PayablesInbox(models.Model):
+    application_id = models.UUIDField()
+    operation_id = models.UUIDField()
+    source_instance = models.CharField(max_length=80)
+    payload = models.JSONField()
+    payload_hash = models.CharField(max_length=64)
+    lease = models.UUIDField()
+    result = models.JSONField(null=True)
+    received_at = models.DateTimeField(auto_now_add=True)
+    acknowledged_at = models.DateTimeField(null=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=('application_id', 'operation_id'), name='payables_inbox_operation',
+            ),
+        ]
