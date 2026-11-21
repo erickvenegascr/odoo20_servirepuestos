@@ -8,7 +8,7 @@ from bridge.catalog_client import CatalogOdoo
 from bridge.catalog_source import configuration
 from bridge.purchase_credit_receipt import PurchaseCreditReceiptSource
 from bridge.purchase_exchange import configured_purchase_bridge
-from bridge.purchase_valuation_snapshot import PurchaseValuationSnapshot
+from bridge.purchase_valuation_snapshot import PurchaseValuationSnapshot, compare_purchase_valuation
 
 
 class Command(BaseCommand):
@@ -18,6 +18,8 @@ class Command(BaseCommand):
         parser.add_argument('request', type=Path, help='Archivo JSON de la solicitud purchase.receive v2')
         parser.add_argument('--with-valuation', action='store_true',
                             help='Incluye cantidades y costos de la OC en la misma lectura de SGA.')
+        parser.add_argument('--compare-with', type=Path,
+                            help='Compara el saldo y costo actuales con una captura anterior de la misma solicitud.')
 
     def handle(self, *args, **options):
         try:
@@ -31,12 +33,15 @@ class Command(BaseCommand):
                 raise CommandError('El gateway de compras debe estar configurado.')
             if not isinstance(payload, dict) or payload.get('application_id') != bridge.application_id:
                 raise CommandError('La solicitud pertenece a otra aplicación Odoo.')
-            if options['with_valuation']:
+            if options['with_valuation'] or options['compare_with']:
                 with PurchaseValuationSnapshot(bridge.source_config) as source:
                     result = source.capture(payload)
             else:
                 with PurchaseCreditReceiptSource(bridge.source_config) as source:
                     result = source.verify(payload)
+            if options['compare_with']:
+                before = json.loads(options['compare_with'].read_text(encoding='utf-8'))
+                result = compare_purchase_valuation(payload, before, result)
         except (ValueError, KeyError, OSError, MySQLError) as exc:
             raise CommandError(getattr(exc, 'code', 'SGA_CREDIT_RECEIPT_UNAVAILABLE')) from None
         self.stdout.write(json.dumps(result, ensure_ascii=False, sort_keys=True))

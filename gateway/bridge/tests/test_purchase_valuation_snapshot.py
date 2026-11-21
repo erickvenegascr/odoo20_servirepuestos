@@ -1,8 +1,10 @@
 from datetime import datetime
+from decimal import Decimal
 from unittest import TestCase
 from unittest.mock import Mock
 
-from bridge.purchase_valuation_snapshot import PurchaseValuationSnapshot
+from bridge.purchase_source import _digest
+from bridge.purchase_valuation_snapshot import PurchaseValuationSnapshot, compare_purchase_valuation, weighted_unit_cost
 from bridge.tests.test_purchase_credit_receipt import credit_request
 from bridge.tests.test_purchase_effects_contract import SOURCE
 
@@ -47,3 +49,28 @@ class PurchaseValuationSnapshotTests(TestCase):
         self.assertEqual('SGA_VALUATION_ORDER_SCOPE_UNVERIFIED', snapshot['code'])
         snapshot, _ = self.capture(native_line(Articulo=42))
         self.assertEqual('SGA_VALUATION_ORDER_LINE_UNVERIFIED', snapshot['code'])
+
+    def test_compares_stock_cost_pending_and_original_unreceived_lines(self):
+        pending = native_line(Articulo=42, Ordered=32)
+        before, _ = self.capture(native_line(), pending)
+        applied = native_line(OrderReceived=2, Cant=10, CantDisponible=10, CostoUnit=97.7,
+                              SupplierOrdered=3, GlobalOrdered=3, CapturedAt=datetime(2026, 11, 19, 10, 3))
+        after, _ = self.capture(applied, pending)
+        after.pop('checksum')
+        after['receipt_verification']['status'] = 'matched'
+        after['checksum'] = _digest(after)
+        result = compare_purchase_valuation(credit_request(), before, after)
+        self.assertEqual(('matched', 37, 35), (result['status'], result['remaining_before'], result['remaining_after']))
+        self.assertEqual(97.7, result['lines'][0]['expected_unit_cost'])
+        self.assertTrue(result['lines'][1]['matched'])
+
+        after.pop('checksum')
+        after['lines'][1].update(received=32, remaining=0, closed=True)
+        after['checksum'] = _digest(after)
+        result = compare_purchase_valuation(credit_request(), before, after)
+        self.assertEqual('mismatch', result['status'])
+        self.assertFalse(result['lines'][1]['matched'])
+
+    def test_weighted_cost_keeps_four_decimals(self):
+        self.assertEqual(Decimal('106.9667'), weighted_unit_cost(1, '104.9000', 2, '108'))
+        self.assertEqual(Decimal('108.0000'), weighted_unit_cost(0, '104.9000', 2, '108'))
