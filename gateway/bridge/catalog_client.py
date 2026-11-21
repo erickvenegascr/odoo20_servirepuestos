@@ -32,6 +32,8 @@ class CatalogOdoo:
                   'check_images': 'media/check', 'apply_image': 'media/image',
                   'suppliers_info': 'catalog/suppliers/info', 'apply_suppliers_batch': 'catalog/suppliers/batch',
                   'apply_suppliers_missing': 'catalog/suppliers/missing',
+                  'payables_keys': 'payables/keys', 'apply_payables_snapshot': 'payables/snapshot',
+                  'payables_poll': 'payables/poll', 'payables_ack': 'payables/ack',
                   'details_info': 'catalog/details/info', 'apply_details_batch': 'catalog/details/batch'}
         if method not in routes:
             raise ValueError('Unsupported application contract method')
