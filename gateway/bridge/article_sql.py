@@ -319,13 +319,12 @@ class ArticleSql:
                 if not cursor.fetchone():
                     raise ArticleError('ARTICLE_WRITER_SCHEMA_UNAVAILABLE')
                 if operation['action'] == 'article.create':
-                    cursor.execute('SELECT MAX(Articulo) AS maximum FROM artsservs')
+                    # Keep advancing when a previously linked native article is absent from the catalog.
+                    cursor.execute('SELECT MAX(article_id) AS maximum FROM ('
+                                   'SELECT MAX(Articulo) AS article_id FROM artsservs UNION ALL '
+                                   'SELECT MAX(article_id) FROM ' + self.schema + '.article_binding'
+                                   ') AS allocated_articles')
                     article = next_article(cursor.fetchone()['maximum'])
-                    # Refuse to reuse an identity previously exported by this
-                    # adapter after somebody physically deleted its native row.
-                    cursor.execute('SELECT article_id FROM ' + self.schema + '.article_binding WHERE article_id=%s', (article,))
-                    if cursor.fetchone():
-                        raise ArticleError('SGA_ARTICLE_NUMBER_REUSE_DETECTED')
                     self._classification(cursor, operation['values']['classification'])
                     self._reference(cursor, article, operation['values']['reference'])
                     try:
