@@ -82,6 +82,13 @@ una operación normal. El volumen no sustituye al respaldo.
 No se incluye el core de Odoo, bases productivas, MDE, SQL adquirido, contraseñas
 anteriores ni evidencias internas en este repositorio público.
 
+## Tarea de saldos hacia Facturas de proveedor
+
+El gateway lee CxP de SGA y la coteja con Facturas de proveedor estándar de Odoo.
+`python gateway/manage.py sync_vendor_bill_balances` simula el cruce y devuelve
+una huella para aprobar el lote de borradores de apertura. La tarea dispone de
+una unidad systemd invocable a demanda. [Configuración de CxP](docs/payables.md#tarea-hacia-facturas-de-proveedor-estándar).
+
 ## Sincronización de proveedores SGA
 
 Configure `SGA_PAYABLES_SOURCE_FILE` y `ODOO_PAYABLES_TARGET_FILE` para la
