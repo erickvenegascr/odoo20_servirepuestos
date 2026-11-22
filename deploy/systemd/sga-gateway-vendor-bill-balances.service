@@ -1,0 +1,18 @@
+[Unit]
+Description=Auditar facturas de proveedor de SGA en Odoo estándar
+After=network-online.target sga-gateway-postgresql.service
+Requires=sga-gateway-postgresql.service
+
+[Service]
+Type=oneshot
+User=sgagateway
+Group=sgagateway
+WorkingDirectory=/opt/sga-gateway/cxp-native-release/gateway
+EnvironmentFile=/etc/sga-gateway/cxp-native.env
+Environment=SGA_WRITES_ENABLED=0
+ExecStart=/opt/sga-gateway/venv/bin/python -B manage.py sync_vendor_bill_balances
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+TimeoutStartSec=0
