@@ -278,6 +278,38 @@ class ArticleSqlLab(unittest.TestCase):
             'vat_rate':13,'vendor_code':'LAB','vendor_product_code':'LAB-CODE','markup':.3}
         return op
 
+    def test_full_create_advances_past_historical_consecutives(self):
+        native_max = self.scalar('SELECT MAX(Articulo) FROM article_fixture.artsservs')
+        historical = (native_max + 1, native_max + 3)
+        other_app = str(uuid.uuid4())
+        old_product = str(uuid.uuid4())
+        with self.db.cursor() as cursor:
+            cursor.execute(
+                'INSERT INTO article_integration.article_binding (application_uuid,product_uuid,article_id) '
+                'VALUES (%s,%s,%s),(%s,%s,%s)',
+                (APP, str(uuid.uuid4()), historical[0], other_app, old_product, historical[1]),
+            )
+
+        writer = self.full_writer()
+        operation = self.full_request()
+        operation['initialization']['vendor_product_code'] = 'LAB-HISTORY'
+        confirmed = writer.apply(operation)
+
+        self.assertEqual(historical[1] + 1, confirmed['article_id'])
+        self.assertTrue(confirmed['initialization_confirmed'])
+        self.assertEqual(confirmed, writer.apply(operation))
+        self.assertEqual(0, self.scalar(
+            'SELECT COUNT(*) FROM article_fixture.artsservs WHERE Articulo IN (%s,%s)', historical,
+        ))
+        self.assertEqual(old_product, self.scalar(
+            'SELECT product_uuid FROM article_integration.article_binding WHERE application_uuid=%s AND article_id=%s',
+            (other_app, historical[1]),
+        ))
+        self.assertEqual(1, self.scalar(
+            'SELECT COUNT(*) FROM article_integration.article_binding WHERE application_uuid=%s AND product_uuid=%s',
+            (APP, operation['product_uuid']),
+        ))
+
     def test_full_create_commits_all_required_rows_without_inventory(self):
         writer=self.full_writer();op=self.full_request();result=writer.apply(op);article=result['article_id']
         self.assertTrue(result['initialization_confirmed']);self.assertEqual(result,writer.apply(op))
