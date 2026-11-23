@@ -14,8 +14,8 @@ CREATE TABLE IF NOT EXISTS sga_supplier_integration.supplier_relation_applicatio
 -- Template for a separate runtime account; provisioning is independent of this DDL.
 -- GRANT SELECT (Articulo,Proveedor,CodigoArticulo,Prioridad,Deshabilitado),
 --       UPDATE (CodigoArticulo,Prioridad,Usuario,Estacion,FechaActualizacion)
---       ON sgadata.articulosproveedor TO 'sgagw_supplier_updates'@'localhost';
--- GRANT SELECT (Proveedor,Activo) ON sgadata.proveedores TO 'sgagw_supplier_updates'@'localhost';
--- GRANT SELECT (Articulo,Trabajado) ON sgadata.artsservs TO 'sgagw_supplier_updates'@'localhost';
+--       ON sgadata.articulosproveedor TO 'sgagw_sup_update'@'localhost';
+-- GRANT SELECT (Proveedor,Activo) ON sgadata.proveedores TO 'sgagw_sup_update'@'localhost';
+-- GRANT SELECT (Articulo,Trabajado) ON sgadata.artsservs TO 'sgagw_sup_update'@'localhost';
 -- GRANT SELECT,INSERT ON sga_supplier_integration.supplier_relation_application
---       TO 'sgagw_supplier_updates'@'localhost';
+--       TO 'sgagw_sup_update'@'localhost';

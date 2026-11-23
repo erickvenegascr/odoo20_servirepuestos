@@ -7,7 +7,7 @@
   "database": "sgadata",
   "unix_socket": "/var/lib/mysql/mysql.sock",
   "integration_schema": "sga_supplier_integration",
-  "user": "sgagw_supplier_updates",
+  "user": "sgagw_sup_update",
   "password": "",
   "audit_user": "ODOO",
   "audit_station": 4
